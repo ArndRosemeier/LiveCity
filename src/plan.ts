@@ -172,8 +172,8 @@ export function createPlan(
             district: id,
             x: x + (merged ? bw / 4 : 0),
             z,
-            w: bw / (merged ? 1 : 2) - r.range(2.8, 5.2),
-            d: bd / 2 - r.range(2.8, 5.2),
+            w: Math.max(12, bw / (merged ? 1 : 2) - r.range(2.8, 5.2)),
+            d: Math.max(12, bd / 2 - r.range(2.8, 5.2)),
             floors,
             style,
             color: r.pick(palette[style]),
@@ -202,7 +202,7 @@ export function massing(p: BuildingPlan, floor: number) {
     const step = Math.floor(floor / Math.max(5, Math.floor(p.floors / 4)));
     factor = Math.max(0.48, 1 - step * 0.13);
   } else if (p.style === "glass" && floor > p.floors * 0.8) factor = 0.82;
-  return { w: p.w * factor, d: p.d * factor };
+  return { w: Math.max(12, p.w * factor), d: Math.max(12, p.d * factor) };
 }
 export interface DistrictData {
   district: number;

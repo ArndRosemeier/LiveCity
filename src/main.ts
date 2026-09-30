@@ -4,6 +4,8 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { Player } from "./player";
+import { Interiors } from "./interiors";
 import { StreamingCity } from "./streaming-city";
 import {
   mountControls,
@@ -139,6 +141,22 @@ await initializePhysics().catch((error) => {
 const destruction = new Destruction();
 scene.add(destruction.root);
 const sound = new CityAudio();
+const player = new Player();
+scene.add(player.avatar.group);
+scene.add(player.trail);
+player.avatar.group.visible = false;
+const interiors = new Interiors(() => city);
+scene.add(interiors.root);
+const playerHud = document.createElement("div");
+playerHud.id = "player-status";
+app.append(playerHud);
+const interactionHud = document.createElement("div");
+interactionHud.id = "interaction";
+app.append(interactionHud);
+const floorControls = document.createElement("div");
+floorControls.id = "floor-controls";
+floorControls.innerHTML = `<button id="floor-down">J · Floor down</button><span id="floor-label"></span><button id="floor-up">U · Floor up</button>`;
+app.append(floorControls);
 let city: StreamingCity;
 let time = 0,
   walking = false,
@@ -159,11 +177,16 @@ function toast(text: string) {
 }
 function generate(seed: string) {
   if (city) {
+    interiors.exit();
     scene.remove(city.root);
     city.dispose();
   }
   destruction.clear();
   city = new StreamingCity(seed, readControls(), destruction.physics);
+  player.scale = player.targetScale = 1;
+  player.flying = false;
+  player.velocity.set(0, 0, 0);
+  player.trail.visible = false;
   scene.add(city.root);
   for (const axis of ["x", "z"]) {
     const input = $<HTMLInputElement>("visit-" + axis);
@@ -189,6 +212,9 @@ function generate(seed: string) {
     orbit.update();
   }
   if (walking) {
+    player.teleport(8.3, 24);
+    player.scale = player.targetScale = 1;
+    player.flying = false;
     camera.position.set(8.3, 1.85, 24);
     yaw = 0;
     pitch = 0;
@@ -201,8 +227,11 @@ const initialSeed =
   new URLSearchParams(location.search).get("seed") || "COMMON-GROUND";
 $("seed").setAttribute("value", initialSeed);
 generate(initialSeed);
-function setTime(hour: number) {
-  const dusk = Math.max(0, Math.min(1, (hour - 17) / 4));
+function setTime(hour: number, schedule = true) {
+  const dusk =
+    hour < 7
+      ? T.MathUtils.clamp((7 - hour) / 2, 0, 1)
+      : T.MathUtils.clamp((hour - 17) / 4, 0, 1);
   const noon = Math.sin(((hour - 6) / 16) * Math.PI);
   sun.position.set(
     Math.cos(((hour - 7) / 14) * Math.PI) * 90,
@@ -211,7 +240,7 @@ function setTime(hour: number) {
   );
   sky.update(hour, sun.position);
   sun.color.set(dusk > 0.4 ? 0xffb977 : 0xffe0ad);
-  sun.intensity = 3.2 * (1 - dusk * 0.88);
+  sun.intensity = 3.2 * (1 - dusk * 0.98);
   hemisphere.intensity = 2.1 * (1 - dusk * 0.72);
   renderer.toneMappingExposure = 1.1 + dusk * 0.25;
   const skyColor = new T.Color().lerpColors(
@@ -221,10 +250,12 @@ function setTime(hour: number) {
   );
   scene.background = skyColor;
   (scene.fog as T.FogExp2).color.copy(skyColor);
+  const minutes = Math.floor(hour * 60) % 1440;
   $("clock").textContent =
-    `${String(Math.floor(hour)).padStart(2, "0")}:${String(Math.round((hour % 1) * 60)).padStart(2, "0")}`;
+    `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
   $("weather").textContent =
     hour < 16 ? "CLEAR SKIES" : hour < 19 ? "GOLDEN HOUR" : "BLUE HOUR";
+  if (schedule) city.life.setHour(hour);
   city.setNight(dusk);
   city.root.traverse((o) => {
     if (o instanceof T.Mesh && o.material instanceof T.MeshStandardMaterial) {
@@ -238,9 +269,15 @@ function setTime(hour: number) {
 }
 setTime(17.7);
 function enterWalk() {
+  interiors.exit();
   walking = true;
   document.body.classList.add("walk");
   orbit.enabled = false;
+  player.teleport(8.3, 24);
+  player.yaw = 0;
+  player.pitch = 0;
+  player.zoom = 5;
+  player.cameraPosition.copy(player.position);
   camera.position.set(8.3, 1.85, 24);
   camera.fov = 68;
   camera.updateProjectionMatrix();
@@ -275,6 +312,8 @@ function lock() {
 }
 function aerial() {
   walking = false;
+  player.avatar.group.visible = false;
+  player.trail.visible = false;
   document.body.classList.remove("walk");
   if (document.pointerLockElement) document.exitPointerLock();
   orbit.enabled = true;
@@ -298,8 +337,8 @@ function aerial() {
 function updateInstructions() {
   $("instructions").textContent = walking
     ? armed
-      ? "WASD MOVE · SHIFT RUN · SPACE JUMP · CLICK IMPACT · E BLAST · M SETTINGS · ESC RELEASE"
-      : "WASD MOVE · SHIFT RUN · SPACE JUMP · ESC RELEASE · M SETTINGS · TAB AERIAL"
+      ? "WASD · WHEEL CAMERA · NUMPAD + / − SIZE · F FLIGHT · G INTERACT · E BLAST · M SETTINGS"
+      : "WASD · WHEEL CAMERA · NUMPAD + / − SIZE · F FLIGHT · G INTERACT · SPACE JUMP · M SETTINGS"
     : armed
       ? "DRAG TO ORBIT · SCROLL TO ZOOM · CLICK IMPACT · E BLAST"
       : "DRAG TO ORBIT · SCROLL TO EXPLORE · ENTER THE STREETS TO WALK";
@@ -325,6 +364,8 @@ $("visit").onclick = () => {
   const x = d.x0 + 8.3,
     z = d.z0 + 24;
   if (walking) {
+    interiors.exit();
+    player.teleport(x, z);
     camera.position.set(x, 1.85, z);
     vy = 0;
     camera.rotation.set(pitch, yaw, 0, "YXZ");
@@ -342,6 +383,27 @@ $("visit").onclick = () => {
       " · street detail is streaming",
   );
 };
+$("visit-door").onclick = () => {
+  const index = (axis: string) =>
+    T.MathUtils.clamp(
+      Math.round(Number($<HTMLInputElement>("visit-" + axis).value) || 1) - 1,
+      0,
+      city.options.blocks - 1,
+    );
+  const d = city.plan.districts[index("x") * city.options.blocks + index("z")],
+    b = d.buildings[0];
+  if (!b) {
+    toast("This district is a park. Choose a built district.");
+    return;
+  }
+  if (!walking) enterWalk();
+  interiors.exit();
+  player.teleport(b.x, b.z + b.front * (b.d / 2 + 1.2));
+  player.yaw = yaw = b.front > 0 ? 0 : Math.PI;
+  player.pitch = pitch = 0;
+  city.requestDistrict(d.id, true);
+  toast("Building entrance · press G to open the door.");
+};
 $("walk").onclick = () => (walking ? lock() : enterWalk());
 $("view").onclick = () => {
   if (walking) aerial();
@@ -357,7 +419,7 @@ $("view").onclick = () => {
 };
 $("help").onclick = () =>
   toast(
-    "Walk: WASD / arrows, Shift sprint, Space jump. Tab switches view. Enable tools to click-impact; E blasts. R restores.",
+    "WASD moves; wheel changes first/third person. Numpad +/− changes physical size. F flies; Space rises and Ctrl/C descends. G opens doors or meets residents. U/J uses the lift. Tab aerial; M settings; R restore.",
   );
 $("generate").onclick = () => {
   const seed = $<HTMLInputElement>("seed").value.trim() || "COMMON-GROUND";
@@ -453,7 +515,7 @@ function attack(blast: boolean, event?: MouseEvent) {
     toast("Aim at a building, street object, or vehicle.");
     return;
   }
-  if (walking && hit.distance > 45) {
+  if (walking && hit.distance > 45 * Math.sqrt(player.scale)) {
     toast("Move closer — tool range is 45 meters.");
     return;
   }
@@ -482,7 +544,8 @@ document.addEventListener("mousemove", (e) => {
   ) {
     yaw -= e.movementX * 0.002;
     pitch = T.MathUtils.clamp(pitch - e.movementY * 0.002, -1.45, 1.45);
-    camera.rotation.set(pitch, yaw, 0, "YXZ");
+    player.yaw = yaw;
+    player.pitch = pitch;
   }
 });
 document.addEventListener("pointerlockchange", () => {
@@ -523,13 +586,39 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "Tab") walking ? aerial() : enterWalk();
   if (e.code === "KeyE") attack(true);
   if (e.code === "KeyR") $("restore").click();
-  if (
-    e.code === "Space" &&
-    walking &&
-    camera.position.y <
-      destruction.floorHeight(camera.position.x, camera.position.z) + 1.9
-  )
-    vy = 4.5;
+  if (e.code === "Space" && walking) player.jump();
+  if (e.code === "KeyF") {
+    if (!walking) enterWalk();
+    player.flying = !player.flying;
+    if (
+      player.flying &&
+      player.grounded &&
+      !environment.blocked(
+        player.position.x,
+        player.position.y + player.scale * 0.6,
+        player.position.z,
+        player.radius,
+        player.height,
+      )
+    ) {
+      player.position.y += player.scale * 0.6;
+      player.grounded = false;
+    }
+    toast(
+      player.flying
+        ? "Flight · Space rises, Ctrl/C descends. Wheel frames your flight."
+        : "Gravity restored.",
+    );
+  }
+  if (walking && (e.code === "NumpadAdd" || e.key === "+")) {
+    if (!player.resize(1.2, environment))
+      toast("Growth blocked by physical clearance. Move into open space.");
+  }
+  if (walking && (e.code === "NumpadSubtract" || e.key === "-"))
+    player.resize(1 / 1.2, environment);
+  if (e.code === "KeyG" && walking) interact();
+  if (e.code === "KeyU" && walking) lift(1);
+  if (e.code === "KeyJ" && walking) lift(-1);
 });
 document.addEventListener("keyup", (e) => keys.delete(e.code));
 window.addEventListener("blur", () => keys.clear());
@@ -539,6 +628,135 @@ window.addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
 });
+renderer.domElement.addEventListener(
+  "wheel",
+  (e) => {
+    if (!walking) return;
+    e.preventDefault();
+    player.zoom = T.MathUtils.clamp(player.zoom + e.deltaY * 0.008, 0, 24);
+  },
+  { passive: false },
+);
+function lift(delta: number) {
+  if (
+    !interiors.elevator ||
+    interiors.elevator.distanceTo(player.position) > 3
+  ) {
+    toast("Use the lift at the end of the central corridor.");
+    return;
+  }
+  if (interiors.changeFloor(delta))
+    player.teleport(
+      interiors.elevator!.x,
+      interiors.elevator!.z,
+      interiors.floorY(),
+    );
+  else toast("This floor is unavailable.");
+}
+$("floor-up").onclick = () => lift(1);
+$("floor-down").onclick = () => lift(-1);
+function interact() {
+  if (interiors.active) {
+    const b = interiors.active,
+      door = interiors.doorPoint(b);
+    door.y = player.position.y;
+    if (player.position.distanceTo(door) < 3 && interiors.floor === 0) {
+      interiors.exit();
+      player.teleport(b.x, b.z + b.front * (b.d / 2 + 2));
+      toast("Back on the street.");
+      return;
+    }
+    if (interiors.interact(player.position)) return;
+    if (interiors.elevator!.distanceTo(player.position) < 3) {
+      toast("Lift · U goes up, J goes down.");
+      return;
+    }
+  } else {
+    const b = interiors.nearest(player.position);
+    if (b) {
+      const message = interiors.enter(b, player.scale);
+      if (message) toast(message);
+      else {
+        player.teleport(
+          b.x,
+          b.z + b.front * (b.d / 2 - 1.5),
+          interiors.floorY(),
+        );
+        toast("Inside · G opens room doors. The lift is at the corridor end.");
+      }
+      return;
+    }
+  }
+  const npc = [...city.citizens, ...city.cars]
+    .filter((a) => {
+      if (!a.alive || !a.group.visible) return false;
+      const sample = city.life.sample(a.group.userData.resident);
+      return interiors.active
+        ? sample.inside &&
+            sample.destination === interiors.active.id &&
+            city.life.floor(sample.id, sample.destination) === interiors.floor
+        : !sample.inside;
+    })
+    .sort(
+      (a, b) =>
+        a.group.position.distanceTo(player.position) -
+        b.group.position.distanceTo(player.position),
+    )[0];
+  if (npc && npc.group.position.distanceTo(player.position) < 5) {
+    const info = city.life.describe(npc.group.userData.resident);
+    toast(
+      info.name +
+        " · " +
+        info.occupation +
+        " · " +
+        info.activity +
+        " · home #" +
+        info.home +
+        " · energy " +
+        info.energy +
+        "% · hunger " +
+        info.hunger +
+        "%",
+    );
+  } else toast("Move near a door or resident and press G.");
+}
+const environment = {
+  blocked: (x: number, y: number, z: number, r: number, h: number) =>
+    interiors.blocked(x, y, z, r, h) ||
+    city.vehicleBlocked(x, y, z, r, h) ||
+    city.volumeBlocked(x, y, z, r, h, interiors.active?.id),
+  floor: (x: number, z: number, y: number) =>
+    interiors.active
+      ? interiors.floorY()
+      : Math.max(city.surfaceHeight(x, z, y), destruction.floorHeight(x, z)),
+  contact: (
+    point: T.Vector3,
+    radius: number,
+    energy: number,
+    landing: boolean,
+  ) => {
+    if (energy < 12000) return;
+    city.life.incident(point.x, point.z, Math.min(70, radius * 4 + 15));
+    city.ensurePhysicsAt(point);
+    const force = Math.min(5, Math.sqrt(energy / 15000)),
+      range = Math.min(8, Math.max(0.8, radius * (landing ? 0.8 : 1.2)));
+    destruction.hit(
+      city,
+      point
+        .clone()
+        .add(
+          new T.Vector3(
+            0,
+            landing ? 0.3 : Math.min(player.height * 0.35, 2),
+            0,
+          ),
+        ),
+      range,
+      force,
+    );
+    sound.impact(Math.min(2, force));
+  },
+};
 let previous = performance.now(),
   frameCount = 0,
   fpsTime = 0;
@@ -549,7 +767,7 @@ function frame(now: number) {
     dt = Math.min(0.05, elapsed);
   previous = now;
   time += dt;
-  const focus = walking ? camera.position : orbit.target;
+  const focus = walking ? player.position : orbit.target;
   city.update(dt, time, destruction.lastImpact, camera, focus);
   const sunDirection = new T.Vector3()
     .set(
@@ -569,50 +787,71 @@ function frame(now: number) {
   sun.position.copy(sun.target.position).addScaledVector(sunDirection, 600);
   destruction.update(dt, city);
   if (walking) {
-    if (
-      document.pointerLockElement ||
-      (captureFailed && document.activeElement === renderer.domElement)
-    ) {
-      let x =
-        Number(keys.has("KeyD") || keys.has("ArrowRight")) -
-        Number(keys.has("KeyA") || keys.has("ArrowLeft"));
-      let z =
-        Number(keys.has("KeyS") || keys.has("ArrowDown")) -
-        Number(keys.has("KeyW") || keys.has("ArrowUp"));
-      const norm = Math.hypot(x, z) || 1,
-        speed = keys.has("ShiftLeft") ? 7 : 3.2;
-      x /= norm;
-      z /= norm;
-      const dx = (x * Math.cos(yaw) + z * Math.sin(yaw)) * dt * speed,
-        dz = (-x * Math.sin(yaw) + z * Math.cos(yaw)) * dt * speed;
-      const nx = T.MathUtils.clamp(
-          camera.position.x + dx,
-          city.plan.min + 8,
-          city.plan.max - 8,
+    const enabled =
+      !!document.pointerLockElement ||
+      (captureFailed && document.activeElement === renderer.domElement);
+    player.yaw = yaw;
+    player.pitch = pitch;
+    player.update(dt, time, keys, enabled, environment);
+    city.playerThreat = {
+      position: player.position,
+      radius: player.radius,
+      height: player.height,
+      speed: player.velocity.length(),
+      flying: player.flying,
+    };
+    player.camera(
+      camera,
+      (p) =>
+        environment.blocked(
+          p.x,
+          p.y,
+          p.z,
+          0.12 * player.scale,
+          0.12 * player.scale,
         ),
-        nz = T.MathUtils.clamp(
-          camera.position.z + dz,
-          city.plan.min + 8,
-          city.plan.max - 8,
-        );
-      if (
-        !city.blocked(nx, camera.position.z) &&
-        destruction.floorHeight(nx, camera.position.z) < camera.position.y - 1.2
-      )
-        camera.position.x = nx;
-      if (
-        !city.blocked(camera.position.x, nz) &&
-        destruction.floorHeight(camera.position.x, nz) < camera.position.y - 1.2
-      )
-        camera.position.z = nz;
-      if (x || z) sound.step(time);
-      const floor =
-        1.85 + destruction.floorHeight(camera.position.x, camera.position.z);
-      vy -= 9.81 * dt;
-      camera.position.y = Math.max(floor, camera.position.y + vy * dt);
-      if (camera.position.y === floor) vy = 0;
+      dt,
+    );
+    if (player.velocity.length() > 1 && !player.flying && player.grounded)
+      sound.step(time / Math.sqrt(player.scale));
+    if (
+      interiors.owner &&
+      interiors.owner.collapseFrom <= interiors.floorY() + 2
+    ) {
+      const b = interiors.active!;
+      interiors.exit();
+      player.teleport(b.x, b.z + b.front * (b.d / 2 + 3));
+      toast("The structure is failing. Evacuating the interior.");
     }
-  } else orbit.update();
+    playerHud.textContent =
+      (player.flying ? "FLIGHT" : "ON FOOT") +
+      " · " +
+      player.scale.toFixed(2) +
+      "× · " +
+      (player.mass >= 1000
+        ? (player.mass / 1000).toFixed(1) + " t"
+        : Math.round(player.mass) + " kg") +
+      " · " +
+      (player.thirdPerson ? "THIRD PERSON" : "FIRST PERSON");
+    const door = interiors.active
+      ? undefined
+      : interiors.nearest(player.position);
+    interactionHud.textContent = interiors.active
+      ? "G · Doors / exit     U / J · Lift at corridor end"
+      : door
+        ? "G · Open door and enter"
+        : "";
+    floorControls.style.display = interiors.active ? "flex" : "none";
+    $("floor-label").textContent = interiors.active
+      ? "Floor " + (interiors.floor + 1) + " / " + interiors.active.floors
+      : "";
+  } else {
+    city.playerThreat = null;
+    playerHud.textContent = "";
+    interactionHud.textContent = "";
+    floorControls.style.display = "none";
+    orbit.update();
+  }
   composer.render();
   frameCount++;
   fpsTime += elapsed;
@@ -621,12 +860,19 @@ function frame(now: number) {
     renderer.domElement.dataset.drawCalls = String(renderer.info.render.calls);
     renderer.domElement.dataset.destroyed = String(destruction.destroyed);
     renderer.domElement.dataset.camera = camera.position.toArray().join(",");
+    renderer.domElement.dataset.player = player.position.toArray().join(",");
+    renderer.domElement.dataset.playerScale = String(player.scale);
+    renderer.domElement.dataset.flying = String(player.flying);
+    renderer.domElement.dataset.residents = String(city.life.population);
+    renderer.domElement.dataset.interior = String(interiors.active?.id ?? -1);
     renderer.domElement.dataset.physicsBodies = String(
       destruction.physics.dynamicBodies,
     );
     renderer.domElement.dataset.colliders = String(
       destruction.physics.colliders,
     );
+    $<HTMLInputElement>("hour").value = String(city.life.hour);
+    setTime(city.life.hour, false);
     $("people").textContent = String(city.population);
     $("stream-status").textContent =
       city.error ||

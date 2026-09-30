@@ -25,7 +25,10 @@ void main(){vec3 d=normalize(vDirection);float y=max(d.y,0.);vec3 col=mix(horizo
     this.mesh.renderOrder = -1;
   }
   update(hour: number, direction: T.Vector3) {
-    const night = T.MathUtils.clamp((hour - 18) / 3, 0, 1);
+    const night =
+      hour < 7
+        ? T.MathUtils.clamp((7 - hour) / 2, 0, 1)
+        : T.MathUtils.clamp((hour - 18) / 3, 0, 1);
     this.uniforms.night.value = night;
     this.uniforms.sun.value.copy(direction).normalize();
     this.uniforms.top.value.lerpColors(

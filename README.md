@@ -39,7 +39,7 @@ Eviction stores removed part indices, building collapse levels, and surviving in
 
 Detailed architecture includes floor slabs, structural columns, actual window apertures, glazing, mullions, storefronts, cornices, balconies, brownstone chimneys, tenement fire escapes and water tanks, industrial roofs, HVAC, Art Deco crowns, and stepped towers. This remains a procedural visual vocabulary, rather than photorealistic reconstructions of individual buildings. `world.ts` retains the original compact generator as a regression fixture; the application uses `StreamingCity`.
 
-`inhabitants.ts` creates seeded bodies with tapered torsos and limbs, procedural faces, hair, skin, clothing, hands, hats, bags, and backpacks. Hip, knee, ankle, shoulder, elbow, and wrist hierarchies animate with two-bone leg IK, planted-foot compensation, arm swing, breathing, head movement, pauses, and impact flight. Nearby faces and fingers receive finer detail. Animated geometry is instanced globally; distant actors are culled. People currently follow district sidewalk loops; traffic follows local road routes with alternating priority, spacing, and impact stops. This is local street life, not a citywide commuting simulation.
+`inhabitants.ts` creates seeded bodies with tapered torsos and limbs, procedural faces, hair, skin, clothing, hands, hats, bags, and backpacks. Hip, knee, ankle, shoulder, elbow, and wrist hierarchies animate with two-bone leg IK, planted-foot compensation, arm swing, breathing, head movement, pauses, and impact flight. Nearby faces and fingers receive finer detail. Animated geometry is instanced globally; distant actors are culled. Nearby residents now follow persistent citywide schedules, with local crowd avoidance, danger reactions, and traffic braking.
 
 ## Destruction and physics
 
@@ -47,7 +47,7 @@ Detailed architecture includes floor slabs, structural columns, actual window ap
 
 Rapier supplies gravity, friction, rotation, sleeping, collision, stacking, continuous collision detection, and ragdoll joints. Vehicles and pedestrians retain their component geometry during fragmentation. Street furniture, road sections, paving, roofs, and facades can break. Rubble affects walking height. The foundation and surrounding landscape provide a stable underlying ground plane.
 
-This is a real-time approximation, not engineering-grade structural analysis. Floor dependency chains replace finite-element stress, fragment collision uses box approximations, and intact walking uses footprint collision. Thin glazing and decorative trims do not each require static colliders. Pools cap rigid bodies at 650 and dust volumes at 100. Old fragments fade after 40 seconds or are recycled when the pool fills; large demolition cannot accumulate unlimited rubble.
+This is a real-time approximation, not engineering-grade structural analysis. Floor dependency chains replace finite-element stress, fragment collision uses box approximations, and the player uses a swept volume with substeps, clearance checks, gravity, roof landings, and energy-based impacts. Thin glazing and decorative trims do not each require static colliders. Pools cap rigid bodies at 650 and dust volumes at 100. Old fragments fade after 40 seconds or are recycled when the pool fills; large demolition cannot accumulate unlimited rubble.
 
 `physics.ts` owns the WASM world and a fixed 60 Hz step with at most three substeps per frame. `audio.ts` synthesizes ambience, footfalls, and impacts. `sky.ts` supplies the sky shader; `surfaces.ts` generates original material textures. `main.ts` owns camera, lighting, postprocessing, controls, and lifecycle.
 
@@ -58,3 +58,19 @@ This is a real-time approximation, not engineering-grade structural analysis. Fl
 Performance uses instanced static and animated meshes, sliced assembly, a worker, capped pixel ratio, and one shadow-casting light. The observed New York preset runs around 60 FPS in the tested browser; actual performance depends on hardware and selected detail/crowd budgets. Read-only DOM telemetry on the main canvas and `window.cityDiagnostics()` support QA.
 
 Application code, Three.js, and Rapier are separate production chunks. Rapier includes WASM in a roughly 4.3 MB JavaScript chunk (about 1.7 MB gzip); the engine chunk-size warning is expected. There is no runtime CDN dependency other than optional Google Fonts with local fallbacks.
+
+## Player, lives, and interiors
+
+Mouse wheel changes third-person camera distance, down to first person. **F** toggles flight; **Space** rises and **Ctrl / C** descends. The procedural player banks and poses in flight, with subtle hand trails.
+
+**Numpad + / −** grows or shrinks the player (ordinary + / − also works). Clearance can prevent growth. Constant-density mass scales with volume; stride, speed, jump height, collision energy, and giant footstep forces change with size. Gravity remains constant.
+
+**G** enters a nearby building, opens a room door, exits at the ground-floor entrance, or inspects a resident. **Visit building entrance** finds a door in the selected district. At the rear lift, **U / J** or the floor buttons travel between floors.
+
+`life.ts` maintains resident identities, home/work/shop assignments, daily schedules, hunger, energy, earnings, deaths, displacement, and traffic delays in compact arrays and sparse event records. The New York preset has 138,240 residents; maximum settings support 491,520. Offscreen travel is evaluated analytically from the simulation clock, with needs and spatial indexing updated in bounded batches. Only nearby residents receive articulated models and local reactions. They commute, work, shop, return home, and sleep. A game hour takes five real minutes. Social relationships and an economic market are not implemented.
+
+Nearby pedestrians avoid crowds, flee danger and giant players, and appear on their scheduled interior floor. Driver-owned vehicles accelerate, brake for people and vehicles ahead, wait at alternating intersection signals, and stop for rubble. Travel delays persist when models are evicted. Building collapse displaces occupants into evacuation; destroyed actors remain dead for the session.
+
+`interiors.ts` generates only the entered building's current floor, with a central corridor, four furnished rooms, hinged room doors, and a lift. Floors have 2.88 meters of clear height and fit the actual setback footprint; tower floors retain usable dimensions. Entrance and room doors have physical collision openings. Furniture and interior walls share the destruction system, and interior damage survives floor changes and re-entry. Lift travel replaces stair geometry. Interior and resident state persist within the running session, not across reloads.
+
+Additional tests verify deterministic resident schedules and needs, displacement, scaled mass and jumping, collision clearance, flight, camera obstruction, livable room dimensions, interior collider disposal, room doors, lift travel, and damage surviving re-entry.

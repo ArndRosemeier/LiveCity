@@ -507,6 +507,7 @@ export function createPerson(seed: string): Person {
       chest,
     );
     bag.userData.detail = false;
+    bag.userData.carriedBag = true;
   }
   return {
     group,
@@ -572,6 +573,16 @@ export function animatePerson(
   }
   p.group.position.set(x, 0.285, z);
   if (p.direction < 0) heading += Math.PI;
+  posePerson(p, dt, time, speed, heading, !!danger);
+}
+export function posePerson(
+  p: Person,
+  dt: number,
+  time: number,
+  speed: number,
+  heading: number,
+  danger = false,
+) {
   let delta =
     T.MathUtils.euclideanModulo(
       heading - p.group.rotation.y + Math.PI,

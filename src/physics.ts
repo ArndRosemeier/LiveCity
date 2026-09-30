@@ -66,6 +66,16 @@ export class CityPhysics {
       this.staticParts.delete(part);
     }
   }
+  bindGeometry(parts: Part[]) {
+    for (const p of parts)
+      if (p.alive && !this.staticParts.has(p)) {
+        const desc = RAPIER.ColliderDesc.cuboid(p.s.x / 2, p.s.y / 2, p.s.z / 2)
+          .setTranslation(p.p.x, p.p.y, p.p.z)
+          .setRotation(p.q)
+          .setFriction(0.7);
+        this.staticParts.set(p, this.world.createCollider(desc));
+      }
+  }
   unbind(city: { parts: Part[] }) {
     for (const p of city.parts) this.removePart(p);
   }

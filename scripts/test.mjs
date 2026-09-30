@@ -44,6 +44,8 @@ execFileSync(
     "src/world.ts",
     "src/destruction.ts",
     "src/streaming-city.ts",
+    "src/player.ts",
+    "src/interiors.ts",
   ],
   { stdio: "inherit" },
 );
@@ -60,8 +62,11 @@ const { initializePhysics, CityPhysics } = await import("../.qa/physics.js");
 await initializePhysics();
 const { createPlan, options, STRIDE } = await import("../.qa/plan.js");
 const { generateDistrict } = await import("../.qa/generation.js");
-const { District } = await import("../.qa/streaming-city.js");
+const { District, StreamingCity } = await import("../.qa/streaming-city.js");
 const { createPerson, animatePerson } = await import("../.qa/inhabitants.js");
+const { Player } = await import("../.qa/player.js");
+const { CityLife } = await import("../.qa/life.js");
+const { interiorLayout, Interiors } = await import("../.qa/interiors.js");
 const plan = createPlan("METROPOLIS-QA");
 assert.deepEqual(
   plan,
@@ -75,6 +80,174 @@ assert.ok(
   "Metropolis must have thousands of buildings",
 );
 assert.equal(new Set(plan.buildings.map((b) => b.style)).size, 7);
+const lifePlan = createPlan("LIFE-QA", { blocks: 8, crowds: 12 });
+const life = new CityLife(lifePlan),
+  sameLife = new CityLife(lifePlan);
+assert.equal(life.count, 768);
+assert.deepEqual(life.homes, sameLife.homes);
+assert.deepEqual(life.jobs, sameLife.jobs);
+const identity = life.describe(5).name;
+life.setHour(2);
+assert.equal(life.sample(5).activity, "sleeping");
+assert.ok(life.sample(5).inside);
+life.setHour(12);
+assert.equal(life.sample(5).activity, "working");
+assert.equal(life.describe(5).name, identity);
+life.setHour(7.1);
+for (let id = 0; id < life.count; id++) {
+  const s = life.sample(id);
+  assert.ok([s.x, s.z, s.heading, s.speed].every(Number.isFinite));
+}
+const home = life.homes[5];
+life.displaced.add(home);
+assert.equal(life.sample(5).activity, "evacuating");
+assert.equal(life.sample(5).inside, false);
+life.dead.add(5);
+assert.equal(life.population, 767);
+assert.ok(!life.nearby(lifePlan.districts.map((d) => d.id)).includes(5));
+const savedIdentity = life.describe(17);
+for (let i = 0; i < 120; i++) life.tick(1 / 60);
+assert.equal(life.describe(17).name, savedIdentity.name);
+life.setHour(12);
+const wage = life.savings[17];
+const energy = life.energy[17];
+for (let i = 0; i < 120; i++) life.tick(1);
+assert.ok(
+  life.savings[17] > wage && life.energy[17] < energy,
+  "Work must earn actual money and consume energy",
+);
+const vacant = new CityLife(createPlan("EMPTY-LIFE", { blocks: 4, crowds: 0 }));
+vacant.tick(1);
+assert.equal(vacant.population, 0);
+for (const b of plan.buildings) {
+  const layout = interiorLayout(b, 1);
+  assert.ok(layout.clearHeight >= 2.8);
+  assert.equal(layout.rooms.length, 4);
+  assert.ok(layout.rooms.every((r) => r.w >= 3 && r.d >= 3));
+}
+const narrow = createPlan("SMALLEST-BLOCKS", {
+  blocks: 4,
+  blockSize: 48,
+  height: 110,
+});
+for (const b of narrow.buildings) {
+  const l = interiorLayout(b, b.floors - 1);
+  assert.ok(
+    l.rooms.every((r) => r.w >= 3 && r.d >= 3),
+    "Even top setbacks and small blocks must retain usable rooms",
+  );
+}
+const player = new Player();
+player.teleport(0, 0, 0);
+const contacts = [];
+const environment = {
+  blocked: () => false,
+  floor: () => 0,
+  contact: (p, r, energy, landing) => contacts.push({ energy, landing }),
+};
+assert.equal(player.mass, 80);
+assert.ok(player.resize(2, environment));
+for (let i = 0; i < 120; i++)
+  player.update(1 / 60, i / 60, new Set(), true, environment);
+assert.ok(Math.abs(player.mass - 640) < 0.1, "Mass must scale cubically");
+assert.ok(Math.abs(player.radius - 0.58) < 0.001);
+assert.equal(
+  player.resize(2, { ...environment, blocked: (x, y, z, r, h) => h > 4 }),
+  false,
+  "Low ceilings must prevent growth",
+);
+player.jump();
+let peak = 0;
+for (let i = 0; i < 180; i++) {
+  player.update(1 / 60, i / 60, new Set(), true, environment);
+  peak = Math.max(peak, player.position.y);
+}
+assert.ok(
+  peak > 1.8 && peak < 2.3,
+  "Jump height scales while gravitational acceleration stays unchanged",
+);
+assert.ok(
+  contacts.some((c) => c.landing && c.energy > 10000),
+  "Scaled landing must transfer physical energy",
+);
+player.flying = true;
+for (let i = 0; i < 120; i++)
+  player.update(1 / 60, i / 60, new Set(["Space"]), true, environment);
+assert.ok(player.position.y > 10);
+assert.ok(player.avatar.group.visible);
+assert.ok(player.avatar.shoulders.every((s) => Math.abs(s.rotation.z) > 0.4));
+const followCamera = new T.PerspectiveCamera();
+player.flying = false;
+player.teleport(0, 0, 0);
+player.yaw = 0;
+player.pitch = 0;
+for (let i = 0; i < 100; i++)
+  player.camera(followCamera, (p) => p.z > 2, 1 / 60);
+assert.ok(
+  followCamera.position.z < 2,
+  "Third-person camera must stop before a wall",
+);
+const interiorPhysics = new CityPhysics();
+const testCity = new StreamingCity(
+  "INTERIOR-QA",
+  { blocks: 4, height: 8, crowds: 4, traffic: 1, budget: 2 },
+  interiorPhysics,
+);
+const testCamera = new T.PerspectiveCamera(65, 1, 0.1, 1000);
+testCamera.position.set(8, 2, 20);
+testCamera.lookAt(8, 2, 0);
+testCamera.updateMatrixWorld();
+for (let i = 0; i < 120; i++)
+  testCity.update(1 / 60, i / 60, null, testCamera, new T.Vector3(8, 0, 20));
+assert.equal(testCity.activeDistricts, 2);
+const enteredPlan = testCity.plan.buildings.find((p) =>
+  testCity.buildings.some((b) => b.x === p.x && b.z === p.z),
+);
+const interior = new Interiors(() => testCity);
+assert.equal(
+  interior.enter(enteredPlan, 2),
+  "You do not fit through this doorway. Shrink with numpad −.",
+);
+assert.equal(interior.enter(enteredPlan, 1), "");
+for (const room of interiorLayout(enteredPlan, 0).rooms)
+  assert.ok(
+    interior.parts.some(
+      (p) =>
+        Math.abs(p.p.x - room.x) < room.w / 2 &&
+        Math.abs(p.p.z - room.z) < room.d / 2 &&
+        p.s.y > 0.2,
+    ),
+    "Every room must contain usable furniture",
+  );
+const floorStart = interior.floorY();
+assert.ok(
+  interior.blocked(enteredPlan.x, floorStart, enteredPlan.z, 0.3, 3.1),
+  "Interior ceilings must enforce head clearance",
+);
+const interiorDoor = interior.doors[0],
+  doorPoint = interiorDoor.closed.clone();
+doorPoint.y = floorStart;
+assert.ok(interior.blocked(doorPoint.x, floorStart, doorPoint.z, 0.05, 1.78));
+assert.ok(interior.interact(doorPoint));
+assert.equal(
+  interior.blocked(doorPoint.x, floorStart, doorPoint.z, 0.05, 1.78),
+  false,
+  "Opening an interior door must release its actual collision aperture",
+);
+const removedIndex = interior.parts.findIndex((p) => p !== interiorDoor.part);
+testCity.remove(interior.parts[removedIndex]);
+interior.exit();
+assert.equal(interior.enter(enteredPlan, 1), "");
+assert.equal(
+  interior.parts[removedIndex].alive,
+  false,
+  "Interior damage must survive leaving and re-entering",
+);
+assert.ok(interior.changeFloor(1));
+assert.equal(interior.floorY(), floorStart + 3.1);
+interior.exit();
+testCity.dispose();
+interiorPhysics.world.free();
 const big = createPlan("MAX-SCALE", {
   blocks: 64,
   blockSize: 100,
@@ -356,7 +529,7 @@ damage.clear();
 assert.equal(damage.destroyed, 0);
 assert.equal(damage.pieces.length, 0);
 console.log(
-  "PASS: kilometer-scale plans, streamed geometry and damage persistence, procedural anatomy and IK, bounded physics, ragdolls, structural collapse, walking collision, restoration and disposal.",
+  "PASS: persistent resident lives and needs, scaled player physics and flight, camera collision, doors and livable interiors, streaming damage persistence, anatomy, ragdolls and structural physics.",
 );
 // Only remove the known temporary compiler outputs created by this test.
 for (const file of outputs) fs.unlinkSync(path.join(dir, file));

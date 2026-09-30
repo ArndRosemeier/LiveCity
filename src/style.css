@@ -297,6 +297,11 @@ input:focus-visible {
 .toast.show {
   opacity: 1;
 }
+.walk .toast {
+  top: 184px;
+  max-width: min(600px, 85vw);
+  text-align: center;
+}
 .loading {
   position: fixed;
   inset: 0;
@@ -507,6 +512,53 @@ canvas:focus {
 .district-nav button {
   grid-column: 1 / -1;
   padding: 9px;
+}
+#player-status,
+#interaction {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  background: #173031dc;
+  color: #eee7d5;
+  border: 1px solid #ffffff20;
+  padding: 9px 16px;
+  border-radius: 4px;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  pointer-events: none;
+}
+#player-status {
+  top: 132px;
+}
+#interaction {
+  bottom: 94px;
+}
+#player-status:empty,
+#interaction:empty {
+  display: none;
+}
+#floor-controls {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 145px;
+  display: none;
+  gap: 12px;
+  align-items: center;
+  z-index: 6;
+  padding: 10px;
+  background: #173031ed;
+  color: #eee7d5;
+  font-size: 11px;
+  border-radius: 4px;
+}
+#floor-controls button {
+  background: #e7bd84;
+  color: #243b39;
+  padding: 8px;
+  border: 0;
+  border-radius: 3px;
 }
 .panel .stats strong {
   font-size: 17px;

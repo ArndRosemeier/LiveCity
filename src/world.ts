@@ -17,6 +17,7 @@ export interface Part {
   owner?: Building;
 }
 export interface Building {
+  planId?: number;
   x: number;
   z: number;
   w: number;

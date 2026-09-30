@@ -1,4 +1,5 @@
 import * as T from "three";
+import { CityLife } from "./life";
 import {
   createPlan,
   massing,
@@ -17,6 +18,7 @@ import {
   ActorRenderer,
   createPerson,
   animatePerson,
+  posePerson,
   createVehicle,
   type Person,
   type Vehicle,
@@ -55,6 +57,7 @@ export class District {
     private snapshot?: Snapshot,
   ) {
     this.buildings = plan.buildings.map((p) => ({
+      planId: p.id,
       x: p.x,
       z: p.z,
       w: p.w,
@@ -267,6 +270,33 @@ float along=abs(facadeNormal.z)>.6?facadePosition.x:facadePosition.z;float fx=fr
 }
 export class StreamingCity {
   root = new T.Group();
+  life: CityLife;
+  interiorView: {
+    building: number;
+    floor: number;
+    rooms: { x: number; z: number; w: number; d: number }[];
+  } | null = null;
+  playerThreat: {
+    position: T.Vector3;
+    radius: number;
+    height: number;
+    speed: number;
+    flying: boolean;
+  } | null = null;
+  private liveActors = new Map<
+    number,
+    {
+      person?: Person;
+      car?: Vehicle;
+      offset: T.Vector3;
+      delay: number;
+      panic: number;
+      speed: number;
+    }
+  >();
+  private lifeScan = -1;
+  private extras: Part[] = [];
+  private extraBatches: T.InstancedMesh[] = [];
   plan: MasterPlan;
   parts: Part[] = [];
   buildings: Building[] = [];
@@ -302,6 +332,7 @@ export class StreamingCity {
     physics: CityPhysics,
   ) {
     this.plan = createPlan(seed, input);
+    this.life = new CityLife(this.plan);
     this.physics = physics;
     this.buildProxies();
     this.root.add(this.actors.root);
@@ -325,7 +356,7 @@ export class StreamingCity {
             this.plan.districts[result.district],
             result,
             (c) => this.material(c),
-            this.plan.options,
+            { ...this.plan.options, crowds: 0, traffic: 0 },
             this.snapshots.get(result.district),
           ),
         );
@@ -535,7 +566,7 @@ export class StreamingCity {
           district,
           result,
           (c) => this.material(c),
-          this.options,
+          { ...this.options, crowds: 0, traffic: 0 },
           this.snapshots.get(id),
         ),
       );
@@ -545,15 +576,13 @@ export class StreamingCity {
     this.parts = [];
     this.buildings = [];
     this.batches = [];
-    this.citizens = [];
-    this.cars = [];
     for (const d of this.loaded.values()) {
       this.parts.push(...d.parts);
       this.buildings.push(...d.buildings);
       this.batches.push(...d.batches);
-      this.citizens.push(...d.citizens);
-      this.cars.push(...d.cars);
     }
+    this.parts.push(...this.extras);
+    this.batches.push(...this.extraBatches);
     this.population = this.citizens.filter((p) => p.alive).length;
     this.actors.rebuild([...this.citizens, ...this.cars]);
   }
@@ -660,49 +689,424 @@ export class StreamingCity {
         } else d.dispose();
       }
     }
-    for (const d of this.loaded.values()) {
-      for (const p of d.citizens) animatePerson(p, dt, time, d.plan, impact);
-      for (const c of d.cars) {
-        if (!c.alive) continue;
-        const length =
-          c.axis === "x" ? d.plan.x1 - d.plan.x0 : d.plan.z1 - d.plan.z0;
-        const coord = c.progress * length,
-          edge = c.dir > 0 ? -3 : 3;
-        const red = Math.floor(time / 9) % 2 === (c.axis === "x" ? 0 : 1);
-        const ahead = d.cars.some(
-          (other) =>
-            other !== c &&
-            other.alive &&
-            other.axis === c.axis &&
-            other.dir === c.dir &&
-            T.MathUtils.euclideanModulo(other.progress - c.progress, 1) *
-              length <
-              6.5,
-        );
-        const danger = impact && c.group.position.distanceTo(impact) < 18;
-        const stop =
-          ahead || danger || (red && (coord < 6 || coord > length - 6));
-        if (!stop) c.progress = (c.progress + (dt * c.speed) / length) % 1;
-        const v = c.dir > 0 ? c.progress : 1 - c.progress;
-        c.group.position.set(
-          c.axis === "x"
-            ? T.MathUtils.lerp(d.plan.x0, d.plan.x1, v)
-            : d.plan.x0 + edge,
-          0.03,
-          c.axis === "z"
-            ? T.MathUtils.lerp(d.plan.z0, d.plan.z1, v)
-            : d.plan.z0 + edge,
-        );
-        c.group.rotation.y =
-          c.axis === "x" ? (c.dir * Math.PI) / 2 : c.dir < 0 ? Math.PI : 0;
-      }
+    this.updateLives(dt, time, impact);
+    for (const d of this.loaded.values())
       d.root.traverse((o) => {
         const b = o.userData.building as Building | undefined;
         if (b) o.visible = o.position.y < b.collapseFrom;
       });
-    }
     this.actors.update([...this.citizens, ...this.cars], camera.position);
     this.population = this.citizens.filter((p) => p.alive).length;
+  }
+  private updateLives(dt: number, time: number, impact: T.Vector3 | null) {
+    this.life.tick(dt);
+    for (const [id, a] of this.liveActors)
+      if (!(a.person || a.car)!.alive) this.life.dead.add(id);
+    for (const b of this.buildings)
+      if (Number.isFinite(b.collapseFrom)) {
+        if (b.planId !== undefined) this.life.displaced.add(b.planId);
+      }
+    if (this.elapsed - this.lifeScan > 1) {
+      this.lifeScan = this.elapsed;
+      const indoors = new Set(
+        this.interiorView
+          ? this.life.indoors(
+              this.interiorView.building,
+              this.interiorView.floor,
+            )
+          : [],
+      );
+      const wanted = new Set(
+        this.life
+          .nearby([...this.loaded.keys()])
+          .slice(0, this.options.crowds * this.options.budget),
+      );
+      for (const id of indoors) wanted.add(id);
+      let changed = false;
+      for (const [id, a] of this.liveActors)
+        if (
+          (!wanted.has(id) && a.panic < this.life.seconds) ||
+          (a.car && (indoors.has(id) || !this.life.sample(id).vehicle))
+        ) {
+          this.liveActors.delete(id);
+          changed = true;
+        }
+      for (const id of wanted)
+        if (!this.liveActors.has(id)) {
+          const v = this.life.sample(id);
+          const useCar = v.vehicle && !indoors.has(id);
+          const actor = useCar
+            ? createVehicle(this.seed + "/vehicle/" + id)
+            : createPerson(this.seed + "/resident/" + id);
+          actor.group.userData.resident = id;
+          actor.group.position.set(v.x, 0.285, v.z);
+          this.liveActors.set(id, {
+            person: useCar ? undefined : (actor as Person),
+            car: useCar ? (actor as Vehicle) : undefined,
+            offset: new T.Vector3(),
+            delay: this.life.delays.get(id) || 0,
+            panic: 0,
+            speed: 0,
+          });
+          changed = true;
+        }
+      if (changed) {
+        this.citizens = [...this.liveActors.values()].flatMap((a) =>
+          a.person ? [a.person] : [],
+        );
+        this.cars = [...this.liveActors.values()].flatMap((a) =>
+          a.car ? [a.car] : [],
+        );
+        this.actors.rebuild([...this.citizens, ...this.cars]);
+      }
+    }
+    const peopleBuckets = new Map<string, Person[]>();
+    for (const p of this.citizens) {
+      if (!p.alive || !p.group.visible) continue;
+      const key =
+        Math.floor(p.group.position.x / 2) +
+        "," +
+        Math.floor(p.group.position.z / 2);
+      if (!peopleBuckets.has(key)) peopleBuckets.set(key, []);
+      peopleBuckets.get(key)!.push(p);
+    }
+    const carBuckets = new Map<string, Vehicle[]>();
+    for (const c of this.cars) {
+      const k =
+        Math.floor(c.group.position.x / 12) +
+        "," +
+        Math.floor(c.group.position.z / 12);
+      if (!carBuckets.has(k)) carBuckets.set(k, []);
+      carBuckets.get(k)!.push(c);
+    }
+    for (const [id, a] of this.liveActors) {
+      const actor = a.person || a.car!;
+      if (!actor.alive) continue;
+      const v = this.life.sample(id),
+        pos = actor.group.position;
+      if (
+        a.person &&
+        this.interiorView &&
+        v.inside &&
+        v.destination === this.interiorView.building &&
+        this.life.floor(id, v.destination) === this.interiorView.floor
+      ) {
+        const room =
+            this.interiorView.rooms[
+              v.activity === "sleeping" ? 1 : v.activity === "working" ? 2 : 0
+            ],
+          base = 0.41 + this.interiorView.floor * 3.1;
+        actor.group.visible = true;
+        actor.group.rotation.x = 0;
+        pos.set(room.x + room.w * 0.18, base, room.z);
+        posePerson(a.person, dt, time, 0, 0);
+        if (v.activity === "sleeping") {
+          pos.set(room.x, base + 0.62, room.z - 1.05);
+          actor.group.rotation.x = Math.PI / 2;
+        } else if (v.activity === "working") {
+          pos.z -= 1.5;
+          for (const arm of a.person.shoulders) arm.rotation.x = -0.65;
+        } else {
+          pos.set(room.x, base - 0.4, room.z + 0.1);
+          for (const hip of a.person.hips) hip.rotation.x = -Math.PI / 2;
+          for (const knee of a.person.knees) knee.rotation.x = Math.PI / 2;
+        }
+        continue;
+      }
+      actor.group.rotation.x = 0;
+      let danger: T.Vector3 | null = null;
+      if (impact && pos.distanceTo(impact) < 28) danger = impact;
+      const player = this.playerThreat;
+      if (
+        player &&
+        player.position.y < 5 + player.height &&
+        Math.hypot(pos.x - player.position.x, pos.z - player.position.z) <
+          player.radius + (player.height > 5 ? 18 : 1.2)
+      )
+        danger = player.position;
+      for (const t of this.life.threats)
+        if (Math.hypot(pos.x - t.x, pos.z - t.z) < t.radius)
+          danger = new T.Vector3(t.x, 0, t.z);
+      if (a.person) {
+        if (danger)
+          a.panic = this.life.seconds + (player && player.height > 5 ? 8 : 3);
+        const frightened = a.panic > this.life.seconds;
+        if (frightened && danger) {
+          const dir = pos.clone().sub(danger);
+          dir.y = 0;
+          if (dir.lengthSq() < 0.01) dir.set(id % 2 ? 1 : -1, 0, 1);
+          dir.normalize();
+          const next = pos
+            .clone()
+            .addScaledVector(dir, dt * (player && player.height > 5 ? 4 : 2.8));
+          if (!this.volumeBlocked(next.x, 0.285, next.z, 0.23, 1.8)) {
+            a.offset.x = next.x - v.x;
+            a.offset.z = next.z - v.z;
+          }
+        } else a.offset.multiplyScalar(Math.exp(-dt * 0.8));
+        if (!v.inside) {
+          const cx = Math.floor(pos.x / 2),
+            cz = Math.floor(pos.z / 2);
+          const separation = new T.Vector3();
+          for (let x = -1; x <= 1; x++)
+            for (let z = -1; z <= 1; z++)
+              for (const other of peopleBuckets.get(cx + x + "," + (cz + z)) ||
+                []) {
+                if (
+                  other === a.person ||
+                  Math.abs(other.group.position.y - pos.y) > 2
+                )
+                  continue;
+                const dx = pos.x - other.group.position.x,
+                  dz = pos.z - other.group.position.z;
+                const distance = Math.hypot(dx, dz);
+                if (distance < 0.7) {
+                  const angle = id * 2.399;
+                  separation.x +=
+                    (distance > 0.01 ? dx / distance : Math.cos(angle)) *
+                    (0.7 - distance);
+                  separation.z +=
+                    (distance > 0.01 ? dz / distance : Math.sin(angle)) *
+                    (0.7 - distance);
+                }
+              }
+          separation.multiplyScalar(Math.min(1, dt * 6));
+          if (
+            !this.volumeBlocked(
+              v.x + a.offset.x + separation.x,
+              0.285,
+              v.z + a.offset.z + separation.z,
+              0.23,
+              1.8,
+            )
+          )
+            a.offset.add(separation);
+        }
+        const target = new T.Vector3(v.x + a.offset.x, 0.285, v.z + a.offset.z);
+        const velocity = target.clone().sub(pos);
+        a.speed = velocity.length() / Math.max(dt, 0.001);
+        pos.copy(target);
+        actor.group.visible = !v.inside || frightened;
+        posePerson(
+          a.person,
+          dt,
+          time,
+          Math.min(4, a.speed),
+          frightened && danger
+            ? Math.atan2(pos.x - danger.x, pos.z - danger.z)
+            : v.heading,
+          frightened,
+        );
+      } else {
+        const forward = new T.Vector3(
+          Math.sin(v.heading),
+          0,
+          Math.cos(v.heading),
+        );
+        let stop = !!danger;
+        const brakingDistance = 6 + (a.speed * a.speed) / 14;
+        if (player && player.position.y < 1.8) {
+          const diff = player.position.clone().sub(pos),
+            along = diff.dot(forward),
+            side = Math.abs(diff.x * forward.z - diff.z * forward.x);
+          if (
+            along > -player.radius &&
+            along < brakingDistance + player.radius &&
+            side < 1.6 + player.radius
+          )
+            stop = true;
+        }
+        const aheadPoint = pos
+          .clone()
+          .addScaledVector(forward, brakingDistance);
+        if (this.physics.floorHeight(aheadPoint.x, aheadPoint.z) > 0.35)
+          stop = true;
+        const nearRoad = this.plan.roads.some(
+          (r) =>
+            Math.abs(pos.x - r) < 7 &&
+            Math.abs(
+              pos.z -
+                this.plan.roads.reduce(
+                  (best, q) =>
+                    Math.abs(pos.z - q) < Math.abs(pos.z - best) ? q : best,
+                  this.plan.roads[0],
+                ),
+            ) < 7,
+        );
+        if (
+          nearRoad &&
+          Math.floor(time / 9) % 2 === (Math.abs(forward.x) > 0.5 ? 0 : 1)
+        )
+          stop = true;
+        const cx = Math.floor(pos.x / 12),
+          cz = Math.floor(pos.z / 12);
+        for (let x = -1; x <= 1; x++)
+          for (let z = -1; z <= 1; z++)
+            for (const other of carBuckets.get(cx + x + "," + (cz + z)) || []) {
+              if (other === a.car || !other.alive) continue;
+              const diff = other.group.position.clone().sub(pos),
+                along = diff.dot(forward);
+              if (
+                along > 0 &&
+                along < brakingDistance &&
+                Math.abs(diff.x * forward.z - diff.z * forward.x) < 1.7
+              )
+                stop = true;
+            }
+        for (const p of this.citizens)
+          if (p.alive && p.group.visible) {
+            const diff = p.group.position.clone().sub(pos),
+              along = diff.dot(forward),
+              side = Math.abs(diff.x * forward.z - diff.z * forward.x);
+            if (
+              Math.abs(diff.y) < 2 &&
+              along > -1 &&
+              along < brakingDistance &&
+              side < 1.8
+            )
+              stop = true;
+          }
+        if (stop) {
+          a.speed = Math.max(0, a.speed - dt * 7);
+        } else {
+          a.speed = Math.min(v.speed, a.speed + dt * 2);
+        }
+        if (v.activity === "commuting") {
+          a.delay += dt * (1 - a.speed / Math.max(0.1, v.speed));
+          this.life.delays.set(id, a.delay);
+        }
+        const desired = this.life.sample(id);
+        pos.x = T.MathUtils.damp(pos.x, desired.x, 8, dt);
+        pos.z = T.MathUtils.damp(pos.z, desired.z, 8, dt);
+        pos.y = 0.03;
+        actor.group.visible = !v.inside;
+        const turn =
+          T.MathUtils.euclideanModulo(
+            v.heading - actor.group.rotation.y + Math.PI,
+            Math.PI * 2,
+          ) - Math.PI;
+        actor.group.rotation.y += turn * Math.min(1, dt * 5);
+        a.car!.axis = Math.abs(forward.x) > 0.5 ? "x" : "z";
+      }
+    }
+  }
+  vehicleBlocked(x: number, y: number, z: number, r: number, h: number) {
+    return this.cars.some(
+      (c) =>
+        c.alive &&
+        c.group.visible &&
+        y < 1.8 &&
+        y + h > 0 &&
+        Math.abs(x - c.group.position.x) < (c.axis === "x" ? 2.2 : 1) + r &&
+        Math.abs(z - c.group.position.z) < (c.axis === "z" ? 2.2 : 1) + r,
+    );
+  }
+  nearBuildings(point: T.Vector3, radius: number) {
+    const result: BuildingPlan[] = [];
+    for (
+      let ix = this.cell(point.x - radius);
+      ix <= this.cell(point.x + radius);
+      ix++
+    )
+      for (
+        let iz = this.cell(point.z - radius);
+        iz <= this.cell(point.z + radius);
+        iz++
+      )
+        result.push(
+          ...this.plan.districts[ix * this.options.blocks + iz].buildings,
+        );
+    return result;
+  }
+  physicsRemove(p: Part) {
+    this.physics.removePart(p);
+  }
+  surfaceHeight(x: number, z: number, ceiling: number) {
+    let floor = 0.23;
+    const district =
+      this.plan.districts[this.cell(x) * this.options.blocks + this.cell(z)];
+    for (const p of district.buildings) {
+      const b = this.loaded.get(p.district)?.buildings[
+          district.buildings.indexOf(p)
+        ],
+        saved = this.snapshots.get(p.district)?.buildings[
+          district.buildings.indexOf(p)
+        ];
+      const top = Math.min(
+        p.floors * 3.1 + 0.8,
+        b?.collapseFrom ?? saved?.from ?? Infinity,
+      );
+      const size = massing(p, Math.min(p.floors - 1, Math.floor(top / 3.1)));
+      if (
+        top > 0.4 &&
+        top <= ceiling &&
+        Math.abs(x - p.x) < size.w / 2 &&
+        Math.abs(z - p.z) < size.d / 2
+      )
+        floor = Math.max(floor, top);
+    }
+    return floor;
+  }
+  physicsInterior(parts: Part[]) {
+    this.physics.bindGeometry(parts);
+  }
+  attachInterior(parts: Part[], batches: T.InstancedMesh[], owner: Building) {
+    this.extras = parts;
+    this.extraBatches = batches;
+    owner.parts.push(...parts);
+    this.physics.bindGeometry(parts);
+    this.refresh();
+  }
+  detachInterior(parts: Part[], batches: T.InstancedMesh[]) {
+    this.physics.unbind({ parts });
+    for (const b of this.buildings)
+      b.parts = b.parts.filter((p) => !parts.includes(p));
+    this.extras = [];
+    this.extraBatches = [];
+    this.refresh();
+  }
+  volumeBlocked(
+    x: number,
+    y: number,
+    z: number,
+    r: number,
+    h: number,
+    ignore?: number,
+  ) {
+    if (
+      x - r < this.plan.min ||
+      x + r > this.plan.max ||
+      z - r < this.plan.min ||
+      z + r > this.plan.max
+    )
+      return true;
+    const ix0 = this.cell(x - r),
+      ix1 = this.cell(x + r),
+      iz0 = this.cell(z - r),
+      iz1 = this.cell(z + r);
+    for (let ix = ix0; ix <= ix1; ix++)
+      for (let iz = iz0; iz <= iz1; iz++)
+        for (const p of this.plan.districts[ix * this.options.blocks + iz]
+          .buildings) {
+          if (p.id === ignore) continue;
+          const live = this.loaded.get(p.district)?.buildings[
+              this.plan.districts[p.district].buildings.indexOf(p)
+            ],
+            saved = this.snapshots.get(p.district)?.buildings[
+              this.plan.districts[p.district].buildings.indexOf(p)
+            ];
+          const top = live?.collapseFrom ?? saved?.from ?? Infinity;
+          const height = Math.min(p.floors * 3.1 + 0.8, top);
+          if (
+            height > 0.4 &&
+            y < height &&
+            y + h > 0.3 &&
+            Math.abs(x - p.x) < p.w / 2 + r &&
+            Math.abs(z - p.z) < p.d / 2 + r
+          )
+            return true;
+        }
+    return false;
   }
   ensurePhysicsAt(point: T.Vector3) {
     for (const d of this.loaded.values())
