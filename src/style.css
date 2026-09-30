@@ -423,3 +423,140 @@ canvas:focus {
   max-height: 65vh;
   overflow-y: auto;
 }
+
+.panel {
+  width: 310px;
+  max-height: calc(100vh - 145px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #e4bb8b55 transparent;
+}
+.range-setting {
+  margin: 13px 0;
+}
+.range-setting label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  letter-spacing: 0;
+  color: #e7ece0;
+}
+.range-setting output {
+  color: #e4bb8b;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 11px;
+}
+.range-setting input {
+  width: 100%;
+  height: 4px;
+  margin: 11px 0 0;
+  accent-color: #e4bb8b;
+  cursor: pointer;
+}
+.control-section {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: #e4bb8b99;
+  border-top: 1px solid #ffffff18;
+  padding-top: 16px;
+  margin-top: 19px;
+}
+.preset-row {
+  display: flex;
+  gap: 5px;
+}
+.preset-row button {
+  padding: 6px 7px;
+  background: #ffffff08;
+  color: #edece0;
+  border: 1px solid #ffffff20;
+  border-radius: 3px;
+  font-size: 9px;
+}
+.apply {
+  width: 100%;
+  margin-top: 18px;
+}
+.generation-status {
+  font-size: 10px;
+  line-height: 1.6;
+  color: #b4c5b3;
+  margin: 13px 0;
+  border-bottom: 1px solid #ffffff20;
+  padding-bottom: 12px;
+}
+.district-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.district-nav label {
+  font-size: 10px;
+  display: block;
+}
+.district-nav input {
+  width: 100%;
+  margin-top: 7px;
+  padding: 7px;
+  background: #ffffff08;
+  color: #edece0;
+  border: 1px solid #ffffff25;
+  border-radius: 3px;
+}
+.district-nav button {
+  grid-column: 1 / -1;
+  padding: 9px;
+}
+.panel .stats strong {
+  font-size: 17px;
+}
+.walk .panel {
+  max-height: calc(100vh - 145px);
+}
+.walk .intro {
+  z-index: 2;
+}
+@media (max-width: 700px) {
+  .panel {
+    width: 265px;
+    max-height: 65vh;
+  }
+  .intro h1 {
+    font-size: 36px;
+  }
+}
+@media (max-width: 480px) {
+  .panel {
+    display: block;
+    width: 100%;
+    max-height: 43vh;
+  }
+  .panel-head,
+  .panel label,
+  .setting,
+  .stats {
+    display: flex;
+  }
+  .seed-row {
+    margin: 8px 0 14px;
+  }
+  .bottom {
+    gap: 8px;
+  }
+  .intro p {
+    display: none;
+  }
+  .intro h1 {
+    font-size: 30px;
+  }
+  .range-setting {
+    margin: 9px 0;
+  }
+  .intro .actions {
+    flex-wrap: wrap;
+  }
+  .brand small {
+    font-size: 8px;
+  }
+}

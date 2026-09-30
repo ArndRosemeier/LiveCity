@@ -1,6 +1,6 @@
 import * as RAPIER from "@dimforge/rapier3d-compat";
 import * as T from "three";
-import type { City, Part } from "./world";
+import type { Part, Building } from "./world";
 
 export const initializePhysics = () => RAPIER.init();
 export class CityPhysics {
@@ -15,7 +15,7 @@ export class CityPhysics {
     world.timestep = 1 / 60;
     world.numSolverIterations = 4;
     world.createCollider(
-      RAPIER.ColliderDesc.cuboid(90, 0.5, 90)
+      RAPIER.ColliderDesc.cuboid(12000, 0.5, 12000)
         .setTranslation(0, -0.7, 0)
         .setFriction(0.8),
     );
@@ -27,7 +27,7 @@ export class CityPhysics {
     this.staticParts.clear();
     this.accumulator = 0;
   }
-  bind(city: City) {
+  bind(city: { parts: Part[]; buildings: Building[] }) {
     const supports = new Set<Part>();
     for (const b of city.buildings)
       for (const floor of b.floors) {
@@ -35,6 +35,7 @@ export class CityPhysics {
         floor.columns.forEach((p) => supports.add(p));
       }
     for (const p of city.parts) {
+      if (!p.alive || this.staticParts.has(p)) continue;
       const masonry =
         p.building >= 0 &&
         p.shape === "box" &&
@@ -65,12 +66,16 @@ export class CityPhysics {
       this.staticParts.delete(part);
     }
   }
+  unbind(city: { parts: Part[] }) {
+    for (const p of city.parts) this.removePart(p);
+  }
   body(
     position: T.Vector3,
     size: T.Vector3,
     velocity: T.Vector3,
     spin: T.Vector3,
     rotation: T.Quaternion,
+    colliderOffset = new T.Vector3(),
   ) {
     const desc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(position.x, position.y, position.z)
@@ -88,6 +93,7 @@ export class CityPhysics {
         Math.max(0.015, size.y * 0.48),
         Math.max(0.015, size.z * 0.48),
       )
+        .setTranslation(colliderOffset.x, colliderOffset.y, colliderOffset.z)
         .setDensity(1200)
         .setFriction(0.68)
         .setRestitution(0.12),
@@ -119,11 +125,16 @@ export class CityPhysics {
       return 0;
     return Math.max(0, 6 - hit.timeOfImpact);
   }
-  joint(a: RAPIER.RigidBody, b: RAPIER.RigidBody, hinge: boolean) {
+  joint(
+    a: RAPIER.RigidBody,
+    b: RAPIER.RigidBody,
+    hinge: boolean,
+    at?: T.Vector3,
+  ) {
     if (!a.isValid() || !b.isValid()) return;
     const pa = new T.Vector3().copy(a.translation()),
       pb = new T.Vector3().copy(b.translation()),
-      point = pa.clone().add(pb).multiplyScalar(0.5);
+      point = at?.clone() || pa.clone().add(pb).multiplyScalar(0.5);
     const qa = new T.Quaternion().copy(a.rotation()).invert(),
       qb = new T.Quaternion().copy(b.rotation()).invert();
     const anchorA = point.clone().sub(pa).applyQuaternion(qa),

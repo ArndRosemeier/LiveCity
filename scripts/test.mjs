@@ -43,19 +43,190 @@ execFileSync(
     "--skipLibCheck",
     "src/world.ts",
     "src/destruction.ts",
+    "src/streaming-city.ts",
   ],
   { stdio: "inherit" },
 );
-for (const file of ["random", "surfaces", "world", "physics", "destruction"]) {
+const outputs = fs.readdirSync(dir).filter((file) => file.endsWith(".js"));
+for (const file of outputs) {
   const output = fs
-    .readFileSync(path.join(dir, file + ".js"), "utf8")
+    .readFileSync(path.join(dir, file), "utf8")
     .replace(/from ['"]\.\/(\w+)['"]/g, "from './$1.js'");
-  fs.writeFileSync(path.join(dir, file + ".js"), output);
+  fs.writeFileSync(path.join(dir, file), output);
 }
 const { City } = await import("../.qa/world.js");
 const { Destruction } = await import("../.qa/destruction.js");
 const { initializePhysics, CityPhysics } = await import("../.qa/physics.js");
 await initializePhysics();
+const { createPlan, options, STRIDE } = await import("../.qa/plan.js");
+const { generateDistrict } = await import("../.qa/generation.js");
+const { District } = await import("../.qa/streaming-city.js");
+const { createPerson, animatePerson } = await import("../.qa/inhabitants.js");
+const plan = createPlan("METROPOLIS-QA");
+assert.deepEqual(
+  plan,
+  createPlan("METROPOLIS-QA"),
+  "Master plan must be deterministic",
+);
+assert.notDeepEqual(plan.roads, createPlan("SECOND-SEED").roads);
+assert.equal(plan.districts.length, 1024);
+assert.ok(
+  plan.buildings.length > 3000,
+  "Metropolis must have thousands of buildings",
+);
+assert.equal(new Set(plan.buildings.map((b) => b.style)).size, 7);
+const big = createPlan("MAX-SCALE", {
+  blocks: 64,
+  blockSize: 100,
+  coverage: 1,
+});
+assert.ok(big.extent > 6000 && big.buildings.length > 14000);
+assert.equal(options({ budget: 999, crowds: NaN }).budget, 12);
+assert.equal(options({ crowds: NaN }).crowds, 34);
+const districtPlan = plan.districts.find((d) =>
+  d.buildings.some((b) => b.floors > 8),
+);
+const generated = generateDistrict(districtPlan, 1);
+assert.deepEqual(generated, generateDistrict(districtPlan, 1));
+assert.ok(
+  generated.count > generateDistrict(districtPlan, 0.2).count,
+  "Detail must change geometry density",
+);
+assert.equal(generated.parts.length, generated.count * STRIDE);
+for (let i = 0; i < generated.parts.length; i += STRIDE) {
+  assert.ok(
+    Array.from(generated.parts.slice(i, i + STRIDE)).every(Number.isFinite),
+  );
+  assert.ok(
+    generated.parts[i + 3] > 0 &&
+      generated.parts[i + 4] > 0 &&
+      generated.parts[i + 5] > 0,
+  );
+}
+const material = (c) => new T.MeshStandardMaterial({ color: c });
+const district = new District(
+  districtPlan,
+  generated,
+  material,
+  options({ crowds: 5, traffic: 2 }),
+);
+while (!district.pump()) {}
+assert.ok(
+  district.buildings.every((b) =>
+    b.floors.every((f) => f.slab && f.columns.length === 4),
+  ),
+);
+const streamedDamage = new Destruction();
+const streamedWorld = {
+  root: district.root,
+  parts: district.parts,
+  buildings: district.buildings,
+  citizens: district.citizens,
+  cars: district.cars,
+  population: district.citizens.length,
+  remove(p) {
+    p.alive = false;
+    p.mesh.setMatrixAt(p.index, new T.Matrix4().makeScale(0, 0, 0));
+  },
+};
+streamedDamage.bindCity(streamedWorld);
+const target = district.buildings[0];
+streamedDamage.hit(streamedWorld, new T.Vector3(target.x, 1, target.z), 8, 2);
+for (let i = 0; i < 900; i++) streamedDamage.update(1 / 60, streamedWorld);
+assert.ok(
+  target.collapsed && target.parts.every((p) => !p.alive),
+  "Streamed support collapse must finish including float-encoded slabs",
+);
+district.citizens[0].alive = false;
+district.cars[0].alive = false;
+const snapshot = district.capture();
+const restored = new District(
+  districtPlan,
+  generateDistrict(districtPlan, 1),
+  material,
+  options({ crowds: 5, traffic: 2 }),
+  snapshot,
+);
+while (!restored.pump()) {}
+assert.deepEqual(
+  restored.capture(),
+  snapshot,
+  "Unloading and regenerating must preserve geometry damage and inhabitants",
+);
+assert.ok(
+  restored.parts.every(
+    (p) => p.building < 0 || p.owner === restored.buildings[p.building],
+  ),
+  "Structural owners must survive reconstruction",
+);
+const person = createPerson("ANATOMY-QA");
+const twin = createPerson("ANATOMY-QA");
+const anatomy = (p) => {
+  const result = [];
+  p.group.traverse((o) => {
+    if (o instanceof T.Mesh)
+      result.push([
+        o.geometry.type,
+        ...o.position,
+        ...o.scale,
+        o.material.color.getHex(),
+      ]);
+  });
+  return result;
+};
+assert.deepEqual(
+  anatomy(person),
+  anatomy(twin),
+  "Procedural anatomy and clothing must reproduce from seed",
+);
+assert.notDeepEqual(anatomy(person), anatomy(createPerson("DIFFERENT-PERSON")));
+for (let i = 0; i < 360; i++) {
+  animatePerson(person, 1 / 60, i / 60, districtPlan, null);
+  person.group.updateMatrixWorld(true);
+  person.group.traverse((o) =>
+    assert.ok(o.matrixWorld.elements.every(Number.isFinite)),
+  );
+  for (const ankle of person.ankles) {
+    const foot = ankle.getWorldPosition(new T.Vector3());
+    assert.ok(
+      foot.y > 0.26 && foot.y < 0.52,
+      "IK feet must stay near the sidewalk",
+    );
+  }
+}
+assert.equal(person.knees.length, 2);
+assert.equal(person.elbows.length, 2);
+// Exercise the new anatomy through the actual ragdoll path, including geometry-
+// centered colliders for heads whose mesh origins lie at the neck.
+const anatomyDamage = new Destruction();
+const anatomyWorld = {
+  ...streamedWorld,
+  parts: [],
+  buildings: [],
+  citizens: [person],
+  cars: [],
+  population: 1,
+  root: new T.Group(),
+};
+anatomyDamage.hit(anatomyWorld, person.group.position.clone(), 1, 1);
+assert.equal(person.alive, false);
+const skullPiece = anatomyDamage.pieces.find(
+  (p) =>
+    p.geometry?.boundingBox &&
+    Math.abs(p.geometry.boundingBox.max.y - 0.255) < 1e-6,
+);
+assert.ok(
+  skullPiece && skullPiece.body.collider(0).halfExtents().y < 0.16,
+  "Ragdoll head collider must match geometry bounds rather than a unit cube",
+);
+for (let i = 0; i < 300; i++) anatomyDamage.update(1 / 60, anatomyWorld);
+assert.ok(
+  anatomyDamage.pieces.every((p) => [...p.p, ...p.v].every(Number.isFinite)),
+);
+anatomyDamage.clear();
+district.dispose();
+restored.dispose();
+streamedDamage.clear();
 const fingerprint = (city) =>
   JSON.stringify({
     roads: city.roads,
@@ -185,9 +356,8 @@ damage.clear();
 assert.equal(damage.destroyed, 0);
 assert.equal(damage.pieces.length, 0);
 console.log(
-  "PASS: deterministic models, seed-dependent streets, valid geometry, walking collision, support collapse, fragment budgets, finite physics, vehicle / pedestrian / road fracture, restoration and disposal.",
+  "PASS: kilometer-scale plans, streamed geometry and damage persistence, procedural anatomy and IK, bounded physics, ragdolls, structural collapse, walking collision, restoration and disposal.",
 );
 // Only remove the known temporary compiler outputs created by this test.
-for (const file of ["random", "surfaces", "world", "physics", "destruction"])
-  fs.unlinkSync(path.join(dir, file + ".js"));
+for (const file of outputs) fs.unlinkSync(path.join(dir, file));
 fs.rmdirSync(dir);

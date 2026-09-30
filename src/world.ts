@@ -3,7 +3,7 @@ import { Random } from "./random";
 import { finish } from "./surfaces";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 const rounded = new RoundedBoxGeometry(1, 1, 1, 2, 0.09);
-type Shape = "box" | "sphere" | "cylinder" | "ring";
+export type Shape = "box" | "sphere" | "cylinder" | "ring" | "roof";
 export interface Part {
   p: T.Vector3;
   s: T.Vector3;
@@ -14,6 +14,7 @@ export interface Part {
   alive: boolean;
   mesh?: T.InstancedMesh;
   index?: number;
+  owner?: Building;
 }
 export interface Building {
   x: number;
@@ -26,7 +27,7 @@ export interface Building {
   collapsed: boolean;
   collapseFrom: number;
 }
-interface Citizen {
+export interface Citizen {
   group: T.Group;
   legs: T.Group[];
   arms: T.Group[];
@@ -50,6 +51,7 @@ const geometries = {
   sphere: new T.IcosahedronGeometry(0.5, 2),
   cylinder: new T.CylinderGeometry(0.5, 0.5, 1, 12),
   ring: new T.TorusGeometry(0.5, 0.055, 6, 20),
+  roof: new T.ConeGeometry(0.707, 1, 4).rotateY(Math.PI / 4),
 };
 const matrix = new T.Matrix4(),
   zero = new T.Matrix4().makeScale(0, 0, 0);
@@ -122,6 +124,7 @@ export class City {
       shape,
       building,
       alive: true,
+      owner: building >= 0 ? this.buildings[building] : undefined,
     };
     this.parts.push(part);
     if (building >= 0) this.buildings[building].parts.push(part);

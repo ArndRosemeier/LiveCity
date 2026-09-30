@@ -1,40 +1,60 @@
-# Common Ground
+# Common Ground — Metropolis
 
-A TypeScript / Three.js / Rapier city that runs entirely in the browser. Every model is authored in procedural geometry: buildings, people, cars, trees, furniture, and landscape. All sound is locally synthesized. No model packs or external asset services are used.
+An original TypeScript / Three.js / Rapier city running entirely in a browser. Buildings, pedestrians, vehicles, trees, furniture, textures, and sound are made procedurally from scratch. No downloaded models or external asset services are required.
 
 ## Run
 
 ```sh
 npm install
 npm run dev
+npm test
+npm run build
+npm run preview
 ```
 
-Open the printed local URL. `npm run build` checks TypeScript and creates `dist`; `npm run preview` serves the production build.
+Open the printed local URL. The build checks the full TypeScript project and bundles the generation worker and Rapier WASM locally.
 
-## Explore
+## Create and explore
 
-- Drag to orbit; scroll to zoom. Choose **Walk the streets** for first-person exploration.
-- **WASD / arrows** move, **Shift** sprints, **Space** jumps. **Esc** releases the mouse. Click the scene to resume. **Tab** switches between walking and aerial views. **M** or **City settings** opens the editor while walking.
-- Edit **City DNA** and press Enter to regenerate. Seeds are included in the URL for sharing. **Restore** or **R** regenerates the original city.
-- Set the hour for changing sunlight, sky, and illuminated windows. Sound is opt-in.
-- Enable **Destruction tools**: click for a local impact; **E** for a larger blast. Aerial blasts use the last pointed location; walking tools use the crosshair. Walking range is 45 meters.
+Ten sliders control grid extent, block size, built density, skyline height, architectural variety, people, traffic, facade detail, street-detail radius, and the number of detailed districts. **Apply city settings** regenerates the city. Radius and district budget also update immediately. Presets provide Metropolis, New York scale, and Old town. The complete seed and configuration are encoded in the URL.
 
-## Architecture and limits
+The grid supports 4–64 blocks on each axis, with 48–100 meter blocks: up to roughly 6.4 kilometers across and more than 14,000 buildings at full density. The New York preset is an interpretation of metropolitan scale, not a geographic reconstruction of New York.
 
-`world.ts` uses a deterministic PRNG to assemble hollow building floors and original articulated inhabitants. Static geometry is batched by shape and material with Three.js instancing. People and cars animate independently. Walking uses building-footprint collision and gravity; traffic alternates priority at intersections.
+- Drag to orbit, scroll to zoom, or choose **Walk the streets**.
+- **WASD / arrows** move, **Shift** sprints, **Space** jumps. **Esc** releases the mouse. **Tab** switches walking/aerial mode; **M** opens settings while walking. If mouse capture is refused, drag to look.
+- Use **Explore the grid** to visit a numbered district in the current perspective. Street detail grows progressively around the destination.
+- Change the time of day for sunlight, sky, and illuminated windows. Sound is opt-in.
+- Enable **Destruction tools**: click for an impact; **E** for a larger blast. Walking tools use the crosshair with a 45 meter range. A distant proxy first requests structural detail; click again after it has grown to damage it.
+- **Restore** or **R** regenerates the original city. Applying a seed or generation change also resets damage.
 
-`destruction.ts` removes individual instances and subdivides nearby geometry into fragments that preserve the original dimensions. Each floor explicitly tracks its slab and four corner supports. Losing its slab or two supports propagates a staged collapse upward; lower floors survive upper-floor damage. A pool of at most 650 fragments uses Rapier rigid bodies with gravity, collision, friction, rotation, sleeping, and continuous collision detection; 100 dust volumes cap particle work. Bodies stack and collide with other fragments and surviving structural elements. Vehicles retain their component geometry during fragmentation; pedestrians retain their geometry and use fixed and spherical joints for an articulated fall. Settled rubble affects walking height and blocks steps that are too high. Road sections, pavement tiles, facade sections, vehicles, people, and street props can break; the underlying foundation and distant landscape provide a stable ground plane.
+Keyboard and mouse with desktop WebGL are required for walking and tools. The interface adapts to smaller screens; touch walking is not implemented.
 
-This is a real-time approximation, not engineering-grade structural analysis. Support tracking models a simplified floor dependency chain, not finite-element stress. Fragment collision uses box approximations. Static collision includes floor slabs, corner supports, masonry bands, roofs, and paving; thin glazing and decorative trims do not need individual colliders. Walking uses footprint collision for intact buildings and cars, plus physics queries for rubble height. Old fragments fade after 40 seconds or are recycled when the budget fills. Large demolition remains bounded rather than accumulating unlimited rubble.
+## Streaming architecture
 
-Seeded generation is reproducible; debris scatter is intentionally nondeterministic. Layout is a walkable street grid with seed-dependent street spacing, building heights, colors, storefronts, parks, inhabitants, and traffic. Pedestrians wait at crossings; traffic follows intersection priority, brakes for cars ahead, and pauses around blasts. People and vehicles use animated instanced batches. Movement and tools require a keyboard/mouse desktop browser with WebGL. If pointer capture is refused, drag to look and use WASD. The responsive interface can be viewed on mobile, but touch walking is not implemented.
+`plan.ts` creates a compact deterministic master plan. Street spacing, parks, building styles, colors, footprints, merged office lots, heights, and a central skyline gradient vary with the seed. The whole skyline is immediately rendered with instanced massing and shader windows. Detailed city geometry is generated only for nearby districts.
 
-`physics.ts` owns the Rapier WASM world, static collider registration, fragment bodies, ragdoll constraints, downward walking queries, and a fixed 60 Hz simulation with at most three substeps per frame. The body pool also removes associated colliders and joints when recycling. `audio.ts` creates a filtered ambient noise bed, footfalls, and impact transients with Web Audio. `sky.ts` generates the sky and sun with a shader. `surfaces.ts` creates original masonry, paving, wood, and asphalt textures with world-space mapping. `main.ts` owns camera controls, day lighting, postprocessing, UI, and the lifecycle. Runtime has no network dependency except optional Google Fonts, which have local fallbacks. Rapier's WASM is bundled locally.
+`generation.worker.ts` runs `generation.ts` off the main thread and transfers packed geometry records. `streaming-city.ts` prioritizes proximity and camera visibility, assembles records in slices, swaps district proxies for detailed instances, and evicts distant detail. The detail radius and district budget bound the active neighborhood. Colliders are normally registered for only the closest four districts, with additional registration on impact. Incomplete collapses retain their district until the structure has finished falling.
 
-Performance: fixed debris/particle budgets, instanced static and animated meshes, capped pixel ratio, one shadow-casting light. The renderer exposes read-only `window.cityDiagnostics()` for QA. Target desktop hardware with WebGL; performance varies with GPU and browser.
+Eviction stores removed part indices, building collapse levels, and surviving inhabitants. Revisiting regenerates identical geometry and reapplies that snapshot, including the reduced distant massing. Damage persists across LOD transitions within the current session; it is not saved across page reloads.
 
-## Validation
+Detailed architecture includes floor slabs, structural columns, actual window apertures, glazing, mullions, storefronts, cornices, balconies, brownstone chimneys, tenement fire escapes and water tanks, industrial roofs, HVAC, Art Deco crowns, and stepped towers. This remains a procedural visual vocabulary, rather than photorealistic reconstructions of individual buildings. `world.ts` retains the original compact generator as a regression fixture; the application uses `StreamingCity`.
 
-`npm test` exercises seed reproducibility, varied street spacing, finite model transforms, building-footprint collision, full and partial support collapse, debris and rigid-body caps, vehicle and pedestrian damage, joint stability, physical fragment stacking, rubble walking queries, road damage, restoration, and disposal without requiring a GPU. `npm run build` checks the full TypeScript project and generates the browser bundle. Browser QA also covers aerial and walking views, seed changes, visible impacts and collapse, time-of-day controls, sound activation, and the mouse-capture fallback. The test harness uses the installed TypeScript 7 compiler and a minimal canvas stub for procedural textures.
+`inhabitants.ts` creates seeded bodies with tapered torsos and limbs, procedural faces, hair, skin, clothing, hands, hats, bags, and backpacks. Hip, knee, ankle, shoulder, elbow, and wrist hierarchies animate with two-bone leg IK, planted-foot compensation, arm swing, breathing, head movement, pauses, and impact flight. Nearby faces and fingers receive finer detail. Animated geometry is instanced globally; distant actors are culled. People currently follow district sidewalk loops; traffic follows local road routes with alternating priority, spacing, and impact stops. This is local street life, not a citywide commuting simulation.
 
-The application code, Three.js engine, and Rapier engine are separate production chunks. Rapier's compatibility build includes its WASM in a roughly 4.3 MB JavaScript chunk (about 1.7 MB gzipped); the initial load trades that size for portable, reliable physics without a CDN or a separate runtime download. The browser's large-chunk build warning is expected for that bundled engine.
+## Destruction and physics
+
+`destruction.ts` removes individual geometry instances and subdivides them into physical fragments retaining their original dimensions. Each floor tracks its slab and four supports. Losing its slab or two supports propagates staged collapse upward; lower floors survive upper-floor damage. Buildings use explicit ownership references so district loading cannot invalidate structural identity.
+
+Rapier supplies gravity, friction, rotation, sleeping, collision, stacking, continuous collision detection, and ragdoll joints. Vehicles and pedestrians retain their component geometry during fragmentation. Street furniture, road sections, paving, roofs, and facades can break. Rubble affects walking height. The foundation and surrounding landscape provide a stable underlying ground plane.
+
+This is a real-time approximation, not engineering-grade structural analysis. Floor dependency chains replace finite-element stress, fragment collision uses box approximations, and intact walking uses footprint collision. Thin glazing and decorative trims do not each require static colliders. Pools cap rigid bodies at 650 and dust volumes at 100. Old fragments fade after 40 seconds or are recycled when the pool fills; large demolition cannot accumulate unlimited rubble.
+
+`physics.ts` owns the WASM world and a fixed 60 Hz step with at most three substeps per frame. `audio.ts` synthesizes ambience, footfalls, and impacts. `sky.ts` supplies the sky shader; `surfaces.ts` generates original material textures. `main.ts` owns camera, lighting, postprocessing, controls, and lifecycle.
+
+## Validation and performance
+
+`npm test` verifies kilometer-scale deterministic plans, option bounds, architectural variety, detail-dependent geometry, structural graphs, streamed collapse, LOD damage reconstruction, seeded human variation, finite joint animation, foot IK, walking collision, partial collapse, fragment caps, physical stacking, ragdoll stability, road damage, restoration, and disposal without a GPU. Browser checks cover the production worker, presets, navigation, street/aerial views, live detail budgets, tools, and runtime errors.
+
+Performance uses instanced static and animated meshes, sliced assembly, a worker, capped pixel ratio, and one shadow-casting light. The observed New York preset runs around 60 FPS in the tested browser; actual performance depends on hardware and selected detail/crowd budgets. Read-only DOM telemetry on the main canvas and `window.cityDiagnostics()` support QA.
+
+Application code, Three.js, and Rapier are separate production chunks. Rapier includes WASM in a roughly 4.3 MB JavaScript chunk (about 1.7 MB gzip); the engine chunk-size warning is expected. There is no runtime CDN dependency other than optional Google Fonts with local fallbacks.

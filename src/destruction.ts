@@ -1,5 +1,6 @@
 import * as T from "three";
-import { City, Part } from "./world";
+import type { Part, Building } from "./world";
+import type { WorldLike } from "./world-types";
 import { CityPhysics } from "./physics";
 import type { RigidBody } from "@dimforge/rapier3d-compat";
 interface Debris {
@@ -38,7 +39,7 @@ export class Destruction {
     T.BufferGeometry,
     { mesh: T.InstancedMesh; slots: Set<number> }
   >();
-  private collapses: { building: number; delay: number; from: number }[] = [];
+  private collapses: { building: Building; delay: number; from: number }[] = [];
   constructor() {
     this.mesh = new T.InstancedMesh(
       new T.BoxGeometry(1, 1, 1),
@@ -114,7 +115,21 @@ export class Destruction {
     };
     if (this.pieces.length === this.max)
       this.physics.removeBody(this.pieces[this.cursor].body);
-    piece.body = this.physics.body(p, s, v, piece.spin, orientation);
+    const collisionSize = s.clone(),
+      collisionOffset = new T.Vector3();
+    if (geometry) {
+      if (!geometry.boundingBox) geometry.computeBoundingBox();
+      geometry.boundingBox!.getSize(collisionSize).multiply(s);
+      geometry.boundingBox!.getCenter(collisionOffset).multiply(s);
+    }
+    piece.body = this.physics.body(
+      p,
+      collisionSize,
+      v,
+      piece.spin,
+      orientation,
+      collisionOffset,
+    );
     if (this.pieces.length < this.max) this.pieces.push(piece);
     else {
       this.pieces[this.cursor] = piece;
@@ -122,7 +137,12 @@ export class Destruction {
     }
     return piece;
   }
-  private fracture(city: City, part: Part, origin: T.Vector3, force: number) {
+  private fracture(
+    city: WorldLike,
+    part: Part,
+    origin: T.Vector3,
+    force: number,
+  ) {
     if (!part.alive) return;
     city.remove(part);
     this.physics.removePart(part);
@@ -153,20 +173,19 @@ export class Destruction {
           );
         }
   }
-  hit(city: City, point: T.Vector3, radius: number, power = 1) {
+  hit(city: WorldLike, point: T.Vector3, radius: number, power = 1) {
     this.lastImpact = point.clone();
     this.impactAge = 0;
-    const damaged = new Set<number>();
+    const damaged = new Set<Building>();
     for (const p of city.parts) {
-      if (!p.alive || p.s.x > 25 || p.s.z > 25) continue;
+      if (!p.alive || (p.building < 0 && (p.s.x > 25 || p.s.z > 25))) continue;
       const dist = p.p.distanceTo(point);
       if (dist < radius) {
         this.fracture(city, p, point, (radius - dist) * power + 2);
-        if (p.building >= 0) damaged.add(p.building);
+        if (p.building >= 0) damaged.add(p.owner || city.buildings[p.building]);
       }
     }
-    for (const id of damaged) {
-      const b = city.buildings[id];
+    for (const b of damaged) {
       for (let floor = 0; floor < b.floors.length; floor++) {
         const base = 0.3 + floor * 3.1;
         const { columns, slab } = b.floors[floor];
@@ -174,9 +193,9 @@ export class Destruction {
           if (base < b.collapseFrom) {
             b.collapseFrom = base;
             b.collapsed = floor === 0;
-            const queued = this.collapses.find((c) => c.building === id);
+            const queued = this.collapses.find((c) => c.building === b);
             if (queued) queued.from = base;
-            else this.collapses.push({ building: id, delay: 0.25, from: base });
+            else this.collapses.push({ building: b, delay: 0.25, from: base });
           }
           break;
         }
@@ -261,34 +280,52 @@ export class Destruction {
           if (first && first !== child) parent = first;
           else hinge = true;
         }
+        const declared = members.find(
+          (m) => m.mesh === child.mesh.userData.jointParent,
+        );
+        if (declared) {
+          parent = declared;
+          hinge = !!child.mesh.userData.jointHinge;
+        }
+        const anchor = child.mesh.userData.jointAnchor as
+          T.Object3D | undefined;
         if (parent?.piece.body && child.piece.body)
-          this.physics.joint(parent.piece.body, child.piece.body, hinge);
+          this.physics.joint(
+            parent.piece.body,
+            child.piece.body,
+            hinge,
+            anchor?.getWorldPosition(new T.Vector3()),
+          );
       }
     }
   }
   floorHeight(x: number, z: number) {
     return this.physics.floorHeight(x, z);
   }
-  bindCity(city: City) {
+  bindCity(city: { parts: Part[]; buildings: Building[] }) {
     this.physics.bind(city);
   }
-  update(dt: number, city: City) {
+  update(dt: number, city: WorldLike) {
     this.impactAge += dt;
     if (this.impactAge > 8) this.lastImpact = null;
     for (let i = this.collapses.length - 1; i >= 0; i--) {
       const c = this.collapses[i];
       c.delay -= dt;
       if (c.delay > 0) continue;
-      const b = city.buildings[c.building];
+      const b = c.building;
       let count = 0;
       for (const p of b.parts) {
-        if (p.alive && p.p.y >= c.from) {
+        if (p.alive && p.p.y >= c.from - 0.01) {
           this.fracture(city, p, new T.Vector3(b.x, b.h * 0.8, b.z), 1.8);
           if (++count >= 14) break;
         }
       }
-      city.root.children.forEach((o) => {
-        if (o.userData.building === c.building && o.position.y >= c.from)
+      city.root.traverse((o) => {
+        if (
+          (o.userData.building === b ||
+            o.userData.building === city.buildings.indexOf(b)) &&
+          o.position.y >= c.from
+        )
           o.visible = false;
       });
       if (count === 0) this.collapses.splice(i, 1);
