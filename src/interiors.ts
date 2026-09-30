@@ -1,4 +1,5 @@
 import * as T from "three";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { Random } from "./random";
 import type { BuildingPlan } from "./plan";
 import { massing } from "./plan";
@@ -10,6 +11,7 @@ export interface Room {
   w: number;
   d: number;
   purpose: string;
+  free?: { x: number; z: number }[];
 }
 export interface InteriorLayout {
   floor: number;
@@ -50,6 +52,7 @@ export class Interiors {
   active: BuildingPlan | null = null;
   floor = 0;
   owner: Building | null = null;
+  private ceiling: Part | null = null;
   private dead = new Map<string, number[]>();
   constructor(private city: () => StreamingCity) {}
   doorPoint(b: BuildingPlan) {
@@ -99,6 +102,20 @@ export class Interiors {
   floorY() {
     return 0.41 + this.floor * 3.1;
   }
+  contains(x: number, z: number, margin = 0) {
+    if (!this.active) return false;
+    const size = massing(this.active, this.floor);
+    return (
+      Math.abs(x - this.active.x) <= size.w / 2 + margin &&
+      Math.abs(z - this.active.z) <= size.d / 2 + margin
+    );
+  }
+  support(x: number, z: number, ceiling = Infinity) {
+    const slab = this.owner?.floors[this.floor]?.slab;
+    return this.contains(x, z) && slab?.alive && this.floorY() <= ceiling
+      ? this.floorY()
+      : null;
+  }
   changeFloor(delta: number) {
     if (!this.active || !this.owner) return false;
     const next = T.MathUtils.clamp(
@@ -146,6 +163,14 @@ export class Interiors {
       r = new Random(b.seed + "/interior/" + this.floor),
       layout = interiorLayout(this.active!, this.floor),
       base = this.floorY();
+    this.ceiling =
+      this.owner?.parts.find(
+        (p) =>
+          p.shape === "box" &&
+          p.s.y === 0.35 &&
+          p.s.x > 5 &&
+          Math.abs(p.p.y - (b.floors * 3.1 + 0.8)) < 1,
+      ) ?? null;
     const add = (
       x: number,
       y: number,
@@ -256,8 +281,8 @@ export class Interiors {
         );
         add(room.x + room.w / 2 - 0.6, 1, room.z, 0.8, 2, 0.8, 0xb7bcb1);
       } else {
-        add(room.x, 0.38, room.z, 2.2, 0.76, 0.85, color);
-        add(room.x, 0.9, room.z + 0.32, 2.2, 0.65, 0.17, color);
+        add(room.x, 0.2, room.z, 2.2, 0.4, 0.85, color);
+        add(room.x, 0.68, room.z + 0.32, 2.2, 0.65, 0.17, color);
         add(room.x, 0.35, room.z - 1.5, 1.5, 0.7, 0.85, 0x967657);
         for (const s of [-1, 1])
           add(room.x + s, 0.4, room.z - 1.5, 0.5, 0.8, 0.5, color);
@@ -295,7 +320,9 @@ export class Interiors {
     const dummy = new T.Object3D();
     for (const [c, parts] of groups) {
       const m = new T.InstancedMesh(
-        new T.BoxGeometry(1, 1, 1),
+        [0xd2c7af, 0xe1d7c2].includes(c)
+          ? new T.BoxGeometry(1, 1, 1)
+          : new RoundedBoxGeometry(1, 1, 1, 3, 0.035),
         new T.MeshStandardMaterial({
           color: c,
           roughness: 0.8,
@@ -324,6 +351,20 @@ export class Interiors {
     const light = new T.PointLight(0xffd6a1, 35, Math.max(b.w, b.d), 2);
     light.position.set(b.x, base + 2.45, b.z);
     this.root.add(light);
+    for (const room of layout.rooms) {
+      room.free = [];
+      for (
+        let x = room.x - room.w / 2 + 0.65;
+        x < room.x + room.w / 2 - 0.65;
+        x += 0.8
+      )
+        for (
+          let z = room.z - room.d / 2 + 0.65;
+          z < room.z + room.d / 2 - 0.65;
+          z += 0.8
+        )
+          if (!this.blocked(x, base, z, 0.29, 1.78)) room.free.push({ x, z });
+    }
     this.city().interiorView = {
       building: b.id,
       floor: this.floor,
@@ -358,8 +399,16 @@ export class Interiors {
     return false;
   }
   blocked(x: number, y: number, z: number, r: number, h: number) {
-    if (!this.active) return false;
-    if (y + h > this.floorY() + 2.86 || y < this.floorY() - 0.1) return true;
+    if (!this.active || !this.contains(x, z, r)) return false;
+    // Only the intact slab supports the player. Exiting a broken facade must
+    // release gravity instead of retaining an infinite interior floor plane.
+    const ceiling = this.owner?.floors[this.floor + 1]?.slab || this.ceiling;
+    if (
+      ceiling?.alive &&
+      y < ceiling.p.y + ceiling.s.y / 2 &&
+      y + h > ceiling.p.y - ceiling.s.y / 2
+    )
+      return true;
     return this.parts.some(
       (p) =>
         p.alive &&

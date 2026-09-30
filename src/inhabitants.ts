@@ -1,6 +1,7 @@
 import * as T from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { Random } from "./random";
+import { HumanSurface } from "./human-surface";
 import type { DistrictPlan } from "./plan";
 export interface Actor {
   group: T.Group;
@@ -27,6 +28,9 @@ export interface Vehicle extends Actor {
   dir: number;
   axis: "x" | "z";
   lane: number;
+  length?: number;
+  width?: number;
+  kind?: "car" | "tram";
 }
 const sphere = new T.SphereGeometry(0.5, 12, 8),
   capsule = new T.CapsuleGeometry(0.5, 1, 4, 8),
@@ -112,13 +116,78 @@ nose.setAttribute(
 );
 nose.computeVertexNormals();
 const materialCache = new Map<number, T.MeshStandardMaterial>();
+function coachwork(profile: number[][]) {
+  const positions: number[] = [],
+    indices: number[] = [],
+    columns = 32,
+    rows = (profile.length - 1) * 6;
+  for (let j = 0; j <= rows; j++) {
+    const t = (j / rows) * (profile.length - 1),
+      i = Math.min(profile.length - 2, Math.floor(t)),
+      f = t - i,
+      a = profile[i],
+      b = profile[i + 1],
+      s = f * f * (3 - 2 * f);
+    for (let k = 0; k <= columns; k++) {
+      const angle = (k / columns) * Math.PI * 2,
+        rx = T.MathUtils.lerp(a[1], b[1], s),
+        ry = T.MathUtils.lerp(a[2], b[2], s),
+        center = T.MathUtils.lerp(a[3], b[3], s);
+      positions.push(
+        Math.sin(angle) * rx,
+        Math.max(0.4, center + Math.cos(angle) * ry),
+        T.MathUtils.lerp(a[0], b[0], f),
+      );
+    }
+  }
+  for (let j = 0; j < rows; j++)
+    for (let k = 0; k < columns; k++) {
+      const a = j * (columns + 1) + k,
+        b = a + columns + 1;
+      indices.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  const g = new T.BufferGeometry();
+  g.setAttribute("position", new T.Float32BufferAttribute(positions, 3));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+  return g;
+}
+const carBody = coachwork([
+  [-2.14, 0.01, 0.01, 0.65],
+  [-2.08, 0.72, 0.13, 0.65],
+  [-1.8, 0.85, 0.21, 0.67],
+  [-1.2, 0.89, 0.25, 0.68],
+  [0, 0.88, 0.27, 0.69],
+  [1.2, 0.86, 0.22, 0.65],
+  [1.82, 0.8, 0.16, 0.63],
+  [2.1, 0.72, 0.11, 0.64],
+  [2.15, 0.01, 0.01, 0.64],
+]);
+const carRoof = coachwork([
+  [-1.34, 0.01, 0.01, 0.89],
+  [-1.27, 0.68, 0.08, 0.98],
+  [-0.92, 0.67, 0.2, 1.13],
+  [-0.3, 0.66, 0.2, 1.14],
+  [0.26, 0.64, 0.19, 1.13],
+  [0.68, 0.67, 0.06, 0.93],
+  [0.82, 0.01, 0.01, 0.87],
+]);
 export function actorMaterial(c: number) {
   let m = materialCache.get(c);
   if (!m) {
     m = new T.MeshStandardMaterial({ color: c, roughness: 0.78 });
     if (c === 0x29434a) {
-      m.roughness = 0.22;
-      m.metalness = 0.4;
+      m.roughness = 0.13;
+      m.metalness = 0.55;
+    }
+    if (
+      [
+        0x6f8587, 0xa25543, 0xc4bfae, 0x4a5967, 0x9b9276, 0x41776d, 0x446d87,
+        0xa75d47,
+      ].includes(c)
+    ) {
+      m.roughness = 0.29;
+      m.metalness = 0.58;
     }
     materialCache.set(c, m);
   }
@@ -167,6 +236,7 @@ export function createPerson(seed: string): Person {
   const scale = r.range(0.93, 1.13),
     width = r.range(0.9, 1.1);
   group.scale.setScalar(scale);
+  Object.assign(group.userData, { seed, skin, hair, shirt, pants, width });
   const spine = new T.Group();
   spine.position.y = 1.17;
   group.add(spine);
@@ -205,6 +275,7 @@ export function createPerson(seed: string): Person {
   );
   mesh(head, hairCap, 0, 0.14, -0.012, 0.218, 0.244, 0.205, hair, skull);
   const hairstyle = r.int(0, 5);
+  group.userData.hairstyle = hairstyle;
   if (hairstyle === 1) {
     mesh(head, sphere, 0, 0.075, -0.095, 0.18, 0.28, 0.12, hair, skull);
   }
@@ -478,7 +549,7 @@ export function createPerson(seed: string): Person {
       0.115,
       r.pick([0x6c6755, 0x895e4c, 0x4d6262]),
       chest,
-    );
+    ).userData.accessory = true;
     for (const side of [-1, 1])
       mesh(
         spine,
@@ -491,7 +562,7 @@ export function createPerson(seed: string): Person {
         0.024,
         0x454b45,
         chest,
-      );
+      ).userData.accessory = true;
   }
   if (r.next() < 0.15) {
     const bag = mesh(
@@ -508,6 +579,7 @@ export function createPerson(seed: string): Person {
     );
     bag.userData.detail = false;
     bag.userData.carriedBag = true;
+    bag.userData.accessory = true;
   }
   return {
     group,
@@ -638,8 +710,8 @@ export function createVehicle(seed: string): Vehicle {
     group = new T.Group(),
     c = r.pick([0x6f8587, 0xa25543, 0xc4bfae, 0x4a5967, 0x9b9276]);
   group.userData.vehicle = true;
-  mesh(group, box, 0, 0.65, 0, 1.75, 0.52, 4.1, c);
-  mesh(group, box, 0, 1.03, -0.25, 1.54, 0.5, 2, c);
+  mesh(group, carBody, 0, 0, 0, 1, 1, 1, c);
+  mesh(group, carRoof, 0, 0, 0, 1, 1, 1, c);
   mesh(group, box, 0, 1.08, 0.8, 1.4, 0.36, 0.05, 0x29434a).rotation.x = -0.3;
   mesh(group, box, 0, 1.08, -1.25, 1.4, 0.36, 0.05, 0x29434a).rotation.x = 0.25;
   if (r.next() < 0.2) {
@@ -713,15 +785,154 @@ export function createVehicle(seed: string): Vehicle {
     lane: r.next(),
   };
 }
+export function createTram(seed: string): Vehicle {
+  const group = new T.Group(),
+    r = new Random(seed),
+    c = r.pick([0x41776d, 0x446d87, 0xa75d47]);
+  group.userData.vehicle = true;
+  group.userData.tram = true;
+  mesh(group, box, 0, 1.47, 0, 2.28, 1.94, 12.2, c);
+  mesh(group, box, 0, 0.53, 0, 2.3, 0.35, 11.9, 0x344548);
+  mesh(group, box, 0, 2.52, 0, 2.13, 0.18, 11.5, 0xd9d3bb);
+  mesh(group, box, 0, 2.75, -1.8, 1.4, 0.36, 2.1, 0x7e8d8b);
+  for (const sign of [-1, 1]) {
+    mesh(
+      group,
+      box,
+      0,
+      1.97,
+      sign * 5.95,
+      1.94,
+      0.91,
+      0.08,
+      0x29434a,
+    ).rotation.x = sign * 0.12;
+    mesh(group, box, 0, 0.95, sign * 6.08, 0.44, 0.15, 0.05, 0xf5ddb3);
+    for (const side of [-1, 1]) {
+      mesh(
+        group,
+        box,
+        side * 0.85,
+        0.96,
+        sign * 6.06,
+        0.26,
+        0.15,
+        0.06,
+        0xf5ddb3,
+      );
+      mesh(group, box, side * 1.153, 1.22, 0, 0.035, 0.15, 11.6, 0xe1d8bd);
+      for (let k = -4; k <= 4; k++)
+        mesh(
+          group,
+          box,
+          side * 1.152,
+          1.98,
+          k * 1.12,
+          0.035,
+          0.85,
+          0.98,
+          0x29434a,
+        );
+      for (const doorZ of [-3, 2.2]) {
+        const door = mesh(
+          group,
+          box,
+          side * 1.178,
+          1.48,
+          doorZ,
+          0.045,
+          1.91,
+          0.94,
+          0xc9c6b4,
+        );
+        door.userData.tramDoor = doorZ;
+        mesh(
+          group,
+          box,
+          side * 1.208,
+          1.89,
+          doorZ,
+          0.028,
+          0.84,
+          0.69,
+          0x29434a,
+        ).userData.tramDoor = doorZ;
+      }
+    }
+    for (const side of [-1, 1])
+      for (const dz of [-0.42, 0.42]) {
+        const m = mesh(
+          group,
+          wheel,
+          side * 1,
+          0.35,
+          sign * 3.9 + dz,
+          0.55,
+          0.13,
+          0.55,
+          0x252d2d,
+        );
+        m.rotation.z = Math.PI / 2;
+        m.userData.tramWheel = true;
+      }
+  }
+  // Spring pantograph arms reach the original overhead contact wire.
+  for (const side of [-1, 1]) {
+    const a = mesh(
+      group,
+      tube,
+      side * 0.42,
+      3.67,
+      0,
+      0.035,
+      1.8,
+      0.035,
+      0x354449,
+    );
+    a.rotation.x = 0.58;
+    const b = mesh(
+      group,
+      tube,
+      side * 0.42,
+      4.9,
+      0.45,
+      0.035,
+      1.8,
+      0.035,
+      0x354449,
+    );
+    b.rotation.x = -0.58;
+  }
+  mesh(group, box, 0, 5.43, 0, 1.3, 0.07, 0.17, 0x293638);
+  return {
+    group,
+    alive: true,
+    progress: 0,
+    speed: 0,
+    dir: 1,
+    axis: "x",
+    lane: 0,
+    length: 12.3,
+    width: 2.3,
+    kind: "tram",
+  };
+}
 const zero = new T.Matrix4().makeScale(0, 0, 0);
 export class ActorRenderer {
   root = new T.Group();
+  closeBudget = 16;
+  private close = new Map<Person, HumanSurface>();
   private batches: {
     mesh: T.InstancedMesh;
     entries: { mesh: T.Mesh; actor: Actor }[];
   }[] = [];
   rebuild(actors: Actor[]) {
-    this.clear();
+    this.clearBatches();
+    for (const [p, s] of this.close)
+      if (!actors.includes(p)) {
+        s.dispose();
+        this.close.delete(p);
+      }
     const lists = new Map<string, { mesh: T.Mesh; actor: Actor }[]>();
     for (const actor of actors)
       actor.group.traverse((o) => {
@@ -752,6 +963,40 @@ export class ActorRenderer {
   }
   update(actors: Actor[], camera: T.Vector3) {
     for (const a of actors) if (a.alive) a.group.updateMatrixWorld(true);
+    const nearest = actors
+      .filter(
+        (a): a is Person =>
+          "hips" in a &&
+          a.alive &&
+          a.group.visible &&
+          a.group.position.distanceTo(camera) <
+            (this.close.has(a as Person) ? 24 : 20),
+      )
+      .sort(
+        (a, b) =>
+          a.group.position.distanceToSquared(camera) *
+            (this.close.has(a) ? 0.85 : 1) -
+          b.group.position.distanceToSquared(camera) *
+            (this.close.has(b) ? 0.85 : 1),
+      )
+      .slice(0, this.closeBudget);
+    for (const [p, s] of this.close)
+      if (!nearest.includes(p)) {
+        s.dispose();
+        this.close.delete(p);
+      }
+    let generated = 0;
+    for (const p of nearest) {
+      let s = this.close.get(p);
+      if (!s) {
+        if (generated >= 1) continue;
+        generated++;
+        s = new HumanSurface(p);
+        this.close.set(p, s);
+        this.root.add(s.root);
+      }
+      s.update(p, performance.now() / 1000);
+    }
     for (const batch of this.batches) {
       batch.entries.forEach((e, i) => {
         const distance = e.actor.group.position.distanceTo(camera);
@@ -759,6 +1004,7 @@ export class ActorRenderer {
           i,
           e.actor.alive &&
             e.actor.group.visible &&
+            (!this.close.has(e.actor as Person) || e.mesh.userData.accessory) &&
             distance < 180 &&
             (!e.mesh.userData.detail || distance < 14)
             ? e.mesh.matrixWorld
@@ -768,9 +1014,15 @@ export class ActorRenderer {
       batch.mesh.instanceMatrix.needsUpdate = true;
     }
   }
-  clear() {
+  private clearBatches() {
     for (const b of this.batches) b.mesh.dispose();
+    for (const b of this.batches) b.mesh.removeFromParent();
     this.batches = [];
+  }
+  clear() {
+    this.clearBatches();
+    for (const s of this.close.values()) s.dispose();
+    this.close.clear();
     this.root.clear();
   }
 }

@@ -170,6 +170,7 @@ export class Destruction {
             origin,
             force,
             part.q,
+            part.shape !== "box" ? part.mesh?.geometry : undefined,
           );
         }
   }
@@ -185,6 +186,10 @@ export class Destruction {
         if (p.building >= 0) damaged.add(p.owner || city.buildings[p.building]);
       }
     }
+    for (let pass = 0; pass < 2; pass++)
+      for (const p of city.parts)
+        if (p.alive && p.support && !p.support.alive)
+          this.fracture(city, p, point, 2);
     for (const b of damaged) {
       for (let floor = 0; floor < b.floors.length; floor++) {
         const base = 0.3 + floor * 3.1;

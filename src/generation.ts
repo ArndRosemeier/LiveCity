@@ -1,4 +1,5 @@
 import { Random } from "./random";
+import { streetInfrastructure } from "./street";
 import { massing, STRIDE, type DistrictPlan, type DistrictData } from "./plan";
 export function generateDistrict(
   district: DistrictPlan,
@@ -18,14 +19,33 @@ export function generateDistrict(
     role = 0,
     floor = -1,
     yaw = 0,
+    pitch = 0,
+    support = -1,
   ) => {
     if (w > 0 && h > 0 && d > 0)
-      data.push(x, y, z, w, h, d, c, shape, b, role, floor, yaw);
+      data.push(
+        x,
+        y,
+        z,
+        w,
+        h,
+        d,
+        c,
+        shape,
+        b,
+        role,
+        floor,
+        yaw,
+        pitch,
+        support,
+      );
+    return data.length / STRIDE - 1;
   };
   const cx = (district.x0 + district.x1) / 2,
     cz = (district.z0 + district.z1) / 2,
     bw = district.x1 - district.x0,
     bd = district.z1 - district.z0;
+  streetInfrastructure(district, detail, add);
   // Tiled, destructible sidewalks and asphalt are generated only in streamed districts.
   for (let x = district.x0 + 2; x < district.x1; x += 4)
     for (let z = district.z0 + 2; z < district.z1; z += 4) {
@@ -50,31 +70,81 @@ export function generateDistrict(
     add(district.x0 + k, 0.04, district.z0, 0.14, 0.025, 2.8, 0xcfc9ad);
     add(district.x0, 0.04, district.z0 + k, 2.8, 0.025, 0.14, 0xcfc9ad);
   }
-  for (let i = -3; i <= 3; i++) {
-    add(district.x0 + i, 0.055, district.z0 + 8, 0.5, 0.025, 2.6, 0xe1dac3);
-    add(district.x0 + 8, 0.055, district.z0 + i, 2.6, 0.025, 0.5, 0xe1dac3);
-  }
-  const tree = (x: number, z: number) => {
-    add(x, 1.8, z, 0.28, 3.6, 0.28, 0x6d5240, 2);
-    for (let k = 0; k < 7; k++) {
-      const a = k * 2.4;
+  for (let i = -6; i <= 6; i++)
+    for (const sign of [-1, 1]) {
       add(
-        x + Math.sin(a) * 0.8,
-        3.7 + (k % 3) * 0.38,
-        z + Math.cos(a) * 0.8,
-        2.8,
-        3,
+        district.x0 + i,
+        0.055,
+        district.z0 + sign * 8,
+        0.5,
+        0.025,
         2.6,
-        k % 2 ? 0x5e764d : 0x78905b,
+        0xe1dac3,
+      );
+      add(
+        district.x0 + sign * 8,
+        0.055,
+        district.z0 + i,
+        2.6,
+        0.025,
+        0.5,
+        0xe1dac3,
+      );
+    }
+  const tree = (x: number, z: number) => {
+    const r = new Random(district.id + "/tree/" + x + "/" + z),
+      height = r.range(4.5, 6.2);
+    const trunk = add(x, 1.65, z, 0.24, 3.3, 0.24, 0x6d5240, 2);
+    for (let k = 0; k < 7; k++) {
+      const a = k * 2.4,
+        length = r.range(1.3, 2.2),
+        pitch = r.range(0.5, 0.9);
+      const dx = Math.sin(a) * Math.sin(pitch) * length,
+        dz = Math.cos(a) * Math.sin(pitch) * length,
+        dy = Math.cos(pitch) * length;
+      add(
+        x + dx / 2,
+        2.45 + dy / 2,
+        z + dz / 2,
+        0.09,
+        length,
+        0.09,
+        0x6d5240,
+        2,
+        -1,
+        0,
+        -1,
+        a,
+        pitch,
+        trunk,
+      );
+    }
+    for (let k = 0; k < 27; k++) {
+      const a = k * 2.399,
+        rr = Math.sqrt(k / 27) * 1.65;
+      add(
+        x + Math.sin(a) * rr,
+        height - 0.6 + Math.cos(k * 1.7) * 0.65 - rr * 0.18,
+        z + Math.cos(a) * rr,
+        r.range(1.05, 1.6),
+        r.range(1.35, 2),
+        r.range(1.05, 1.6),
+        r.pick([0x5e764d, 0x78905b, 0x506c47, 0x697f52]),
         1,
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        trunk,
       );
     }
   };
   for (const x of [district.x0 + 8.2, district.x1 - 8.2]) {
     for (const z of [district.z0 + 15, district.z1 - 15]) tree(x, z);
-    add(x, 2.8, cz, 0.12, 5.6, 0.12, 0x394b48, 2);
-    add(x, 5.55, cz, 0.68, 0.12, 0.68, 0x33443f);
-    add(x, 5.45, cz, 0.4, 0.16, 0.4, 0xf4d39b);
+    const lamp = add(x, 2.8, cz, 0.12, 5.6, 0.12, 0x394b48, 2);
+    add(x, 5.55, cz, 0.68, 0.12, 0.68, 0x33443f, 0, -1, 0, -1, 0, 0, lamp);
+    add(x, 5.45, cz, 0.4, 0.16, 0.4, 0xf4d39b, 0, -1, 0, -1, 0, 0, lamp);
     add(x, 0.52, cz + 5, 1.8, 0.12, 0.6, 0x967657);
     add(x, 0.9, cz + 5 - 0.25, 1.8, 0.58, 0.1, 0x967657);
     for (const a of [-0.7, 0.7])

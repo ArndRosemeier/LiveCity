@@ -4,6 +4,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { Player } from "./player";
 import { Interiors } from "./interiors";
 import { StreamingCity } from "./streaming-city";
@@ -20,6 +21,8 @@ import { Destruction } from "./destruction";
 import { CityAudio } from "./audio";
 import "./style.css";
 import { Sky } from "./sky";
+import { CityEnvironment } from "./environment";
+import { ResidentStudio } from "./resident-studio";
 import { initializePhysics } from "./physics";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -44,6 +47,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = T.PCFShadowMap;
 renderer.toneMapping = T.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
+const reflectionEnvironment = new CityEnvironment(renderer);
 app.prepend(renderer.domElement);
 renderer.domElement.tabIndex = 0;
 renderer.info.autoReset = false;
@@ -68,6 +72,18 @@ orbit.minPolarAngle = 0.1;
 orbit.update();
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
+const contactShadows = new SSAOPass(
+  scene,
+  camera,
+  Math.round(innerWidth * 0.65),
+  Math.round(innerHeight * 0.65),
+  16,
+);
+contactShadows.kernelRadius = 0.65;
+contactShadows.minDistance = 0.0001;
+contactShadows.maxDistance = 0.025;
+composer.addPass(contactShadows);
+let contactShadowsEnabled = true;
 const bloom = new UnrealBloomPass(
   new T.Vector2(innerWidth, innerHeight),
   0.16,
@@ -143,6 +159,8 @@ scene.add(destruction.root);
 const sound = new CityAudio();
 const player = new Player();
 scene.add(player.avatar.group);
+scene.add(player.surface.root);
+player.surface.root.visible = false;
 scene.add(player.trail);
 player.avatar.group.visible = false;
 const interiors = new Interiors(() => city);
@@ -183,10 +201,12 @@ function generate(seed: string) {
   }
   destruction.clear();
   city = new StreamingCity(seed, readControls(), destruction.physics);
+  city.setPeopleBudget(Number($<HTMLInputElement>("people-detail").value));
   player.scale = player.targetScale = 1;
   player.flying = false;
   player.velocity.set(0, 0, 0);
   player.trail.visible = false;
+  player.surface.root.visible = false;
   scene.add(city.root);
   for (const axis of ["x", "z"]) {
     const input = $<HTMLInputElement>("visit-" + axis);
@@ -228,6 +248,8 @@ const initialSeed =
 $("seed").setAttribute("value", initialSeed);
 generate(initialSeed);
 function setTime(hour: number, schedule = true) {
+  scene.environment = reflectionEnvironment.update(city.seed, hour);
+  scene.environmentIntensity = 0.45;
   const dusk =
     hour < 7
       ? T.MathUtils.clamp((7 - hour) / 2, 0, 1)
@@ -255,7 +277,7 @@ function setTime(hour: number, schedule = true) {
     `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
   $("weather").textContent =
     hour < 16 ? "CLEAR SKIES" : hour < 19 ? "GOLDEN HOUR" : "BLUE HOUR";
-  if (schedule) city.life.setHour(hour);
+  if (schedule) city.seekHour(hour);
   city.setNight(dusk);
   city.root.traverse((o) => {
     if (o instanceof T.Mesh && o.material instanceof T.MeshStandardMaterial) {
@@ -268,6 +290,42 @@ function setTime(hour: number, schedule = true) {
   });
 }
 setTime(17.7);
+const residentStudio = new ResidentStudio(
+  (id) => {
+    const count = city.life.count,
+      i = ((id % Math.max(1, count)) + Math.max(1, count)) % Math.max(1, count);
+    if (!count)
+      return {
+        seed: city.seed + "/resident/0",
+        name: "A visitor",
+        occupation: "Visiting",
+        activity: "exploring",
+        home: 0,
+        energy: 100,
+        hunger: 0,
+        count,
+      };
+    return {
+      ...city.life.describe(i),
+      seed: city.seed + "/resident/" + i,
+      count,
+    };
+  },
+  () => scene.environment,
+);
+$("people-studio").onclick = () => {
+  document.exitPointerLock();
+  keys.clear();
+  residentStudio.show(
+    city.citizens.find((p) => p.alive && p.group.visible)?.group.userData
+      .resident || 0,
+  );
+};
+$("people-detail").oninput = () => {
+  const count = Number($<HTMLInputElement>("people-detail").value);
+  city.setPeopleBudget(count);
+  $("people-detail-label").textContent = count + " people";
+};
 function enterWalk() {
   interiors.exit();
   walking = true;
@@ -313,6 +371,7 @@ function lock() {
 function aerial() {
   walking = false;
   player.avatar.group.visible = false;
+  player.surface.root.visible = false;
   player.trail.visible = false;
   document.body.classList.remove("walk");
   if (document.pointerLockElement) document.exitPointerLock();
@@ -463,6 +522,14 @@ $("sound").onclick = async () => {
     toast("Audio could not start in this browser.");
   }
 };
+$("contact-shadows").onclick = () => {
+  contactShadowsEnabled = !contactShadowsEnabled;
+  $("contact-shadows").textContent = contactShadowsEnabled ? "ON" : "OFF";
+  $("contact-shadows").setAttribute(
+    "aria-pressed",
+    String(contactShadowsEnabled),
+  );
+};
 $("destroy").onclick = () => {
   armed = !armed;
   $("destroy").classList.toggle("on", armed);
@@ -558,6 +625,7 @@ document.addEventListener("pointerlockchange", () => {
     );
 });
 document.addEventListener("keydown", (e) => {
+  if (residentStudio.open) return;
   if (e.target instanceof HTMLInputElement) return;
   if (
     e.target instanceof HTMLButtonElement &&
@@ -627,6 +695,10 @@ window.addEventListener("resize", () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
+  contactShadows.setSize(
+    Math.round(innerWidth * 0.65),
+    Math.round(innerHeight * 0.65),
+  );
 });
 renderer.domElement.addEventListener(
   "wheel",
@@ -690,6 +762,7 @@ function interact() {
   const npc = [...city.citizens, ...city.cars]
     .filter((a) => {
       if (!a.alive || !a.group.visible) return false;
+      if (a.group.userData.tram) return !interiors.active;
       const sample = city.life.sample(a.group.userData.resident);
       return interiors.active
         ? sample.inside &&
@@ -703,6 +776,17 @@ function interact() {
         b.group.position.distanceTo(player.position),
     )[0];
   if (npc && npc.group.position.distanceTo(player.position) < 5) {
+    if (npc.group.userData.tram) {
+      toast(
+        "Tram line " +
+          npc.group.userData.line +
+          " · " +
+          (npc.group.userData.doorsOpen ? "boarding" : "in service") +
+          " · stop " +
+          (npc.group.userData.station + 1),
+      );
+      return;
+    }
     const info = city.life.describe(npc.group.userData.resident);
     toast(
       info.name +
@@ -726,9 +810,11 @@ const environment = {
     city.vehicleBlocked(x, y, z, r, h) ||
     city.volumeBlocked(x, y, z, r, h, interiors.active?.id),
   floor: (x: number, z: number, y: number) =>
-    interiors.active
-      ? interiors.floorY()
-      : Math.max(city.surfaceHeight(x, z, y), destruction.floorHeight(x, z)),
+    Math.max(
+      interiors.support(x, z, y) ?? -Infinity,
+      city.surfaceHeight(x, z, y),
+      destruction.floorHeight(x, z),
+    ),
   contact: (
     point: T.Vector3,
     radius: number,
@@ -766,6 +852,10 @@ function frame(now: number) {
   const elapsed = (now - previous) / 1000,
     dt = Math.min(0.05, elapsed);
   previous = now;
+  if (residentStudio.open) {
+    residentStudio.update(dt, now / 1000);
+    return;
+  }
   time += dt;
   const focus = walking ? player.position : orbit.target;
   city.update(dt, time, destruction.lastImpact, camera, focus);
@@ -816,12 +906,15 @@ function frame(now: number) {
       sound.step(time / Math.sqrt(player.scale));
     if (
       interiors.owner &&
-      interiors.owner.collapseFrom <= interiors.floorY() + 2
+      (interiors.owner.collapseFrom <= interiors.floorY() + 2 ||
+        !interiors.contains(
+          player.position.x,
+          player.position.z,
+          player.radius,
+        ))
     ) {
-      const b = interiors.active!;
       interiors.exit();
-      player.teleport(b.x, b.z + b.front * (b.d / 2 + 3));
-      toast("The structure is failing. Evacuating the interior.");
+      toast("Outside the interior · gravity follows the remaining structure.");
     }
     playerHud.textContent =
       (player.flying ? "FLIGHT" : "ON FOOT") +
@@ -852,6 +945,10 @@ function frame(now: number) {
     floorControls.style.display = "none";
     orbit.update();
   }
+  contactShadows.enabled = contactShadowsEnabled && walking;
+  contactShadows.kernelRadius = 0.65 * Math.sqrt(player.scale);
+  contactShadows.minDistance = 0.012 / camera.far;
+  contactShadows.maxDistance = (0.85 * Math.sqrt(player.scale)) / camera.far;
   composer.render();
   frameCount++;
   fpsTime += elapsed;
@@ -874,6 +971,16 @@ function frame(now: number) {
     $<HTMLInputElement>("hour").value = String(city.life.hour);
     setTime(city.life.hour, false);
     $("people").textContent = String(city.population);
+    $("life-status").textContent =
+      city.life.population.toLocaleString() +
+      " persistent lives · " +
+      city.transit.lines.length +
+      " tram lines · " +
+      city.transit.fleetSize +
+      " streetcars";
+    renderer.domElement.dataset.trams = String(
+      city.cars.filter((c) => c.kind === "tram").length,
+    );
     $("stream-status").textContent =
       city.error ||
       city.activeDistricts +

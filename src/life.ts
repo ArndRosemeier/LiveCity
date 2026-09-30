@@ -144,6 +144,21 @@ export class CityLife {
       end = this.door(b, vehicle),
       da = this.plan.districts[a.district],
       db = this.plan.districts[b.district];
+    if (vehicle) {
+      const roadA = a.front < 0 ? da.z0 : da.z1,
+        roadB = b.front < 0 ? db.z0 : db.z1;
+      const trunkRoad = this.plan.roads[da.ix],
+        vertical = Math.sign(roadB - roadA) || 1;
+      const trunk = trunkRoad - vertical * 4,
+        za = roadA + (Math.sign(trunk - start.x) || -1) * 4,
+        zb = roadB + (Math.sign(end.x - trunk) || 1) * 4;
+      return [
+        { x: start.x, z: za },
+        { x: trunk, z: za },
+        { x: trunk, z: zb },
+        { x: end.x, z: zb },
+      ];
+    }
     const lane = vehicle ? -3 : 8.1;
     const za = a.front < 0 ? da.z0 + lane : da.z1 - lane,
       zb = b.front < 0 ? db.z0 + lane : db.z1 - lane;

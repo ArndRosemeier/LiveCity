@@ -1,5 +1,14 @@
 import * as T from "three";
-import { CityLife } from "./life";
+import { CityLife, type LifeSample } from "./life";
+import {
+  advanceCrowd,
+  crossingWait,
+  stopLine,
+  signalPhase,
+  type CrowdBody,
+} from "./traffic";
+import { SIGNAL_COLORS, WALK_COLORS } from "./street";
+import { Transit } from "./transit";
 import {
   createPlan,
   massing,
@@ -46,6 +55,12 @@ export class District {
   batches: T.InstancedMesh[] = [];
   citizens: Person[] = [];
   cars: Vehicle[] = [];
+  lamps: {
+    part: Part;
+    axis: "x" | "z" | "walk";
+    aspect: number;
+    active?: boolean;
+  }[] = [];
   cursor = 0;
   ready = false;
   bound = false;
@@ -88,15 +103,21 @@ export class District {
         s: new T.Vector3(a[i + 3], a[i + 4], a[i + 5]),
         color: a[i + 6],
         shape: (["box", "sphere", "cylinder", "roof"] as Shape[])[a[i + 7]],
-        q: new T.Quaternion().setFromAxisAngle(
-          new T.Vector3(0, 1, 0),
-          a[i + 11],
+        q: new T.Quaternion().setFromEuler(
+          new T.Euler(a[i + 12], a[i + 11], 0, "YXZ"),
         ),
         building: b,
         alive: true,
         owner: b >= 0 ? this.buildings[b] : undefined,
+        support: a[i + 13] >= 0 ? this.parts[a[i + 13]] : undefined,
       };
       this.parts.push(p);
+      if (a[i + 9] >= 10 && a[i + 9] <= 12)
+        this.lamps.push({
+          part: p,
+          axis: a[i + 9] === 10 ? "x" : a[i + 9] === 11 ? "z" : "walk",
+          aspect: a[i + 10],
+        });
       if (b >= 0) {
         this.buildings[b].parts.push(p);
         const role = a[i + 9],
@@ -193,6 +214,22 @@ export class District {
     this.ready = true;
     return true;
   }
+  updateSignals(time: number) {
+    const phase = signalPhase(time, this.plan.ix, this.plan.iz);
+    for (const lamp of this.lamps) {
+      const active =
+        lamp.axis === "walk"
+          ? Number(phase.walk) === lamp.aspect
+          : ["red", "amber", "green"][lamp.aspect] === phase[lamp.axis];
+      if (active === lamp.active || !lamp.part.mesh) continue;
+      lamp.active = active;
+      lamp.part.mesh.setColorAt(
+        lamp.part.index!,
+        new T.Color().setScalar(active ? 1 : 0.055),
+      );
+      lamp.part.mesh.instanceColor!.needsUpdate = true;
+    }
+  }
   capture(): Snapshot {
     return {
       dead: this.parts.flatMap((p, i) => (p.alive ? [] : [i])),
@@ -271,10 +308,17 @@ float along=abs(facadeNormal.z)>.6?facadePosition.x:facadePosition.z;float fx=fr
 export class StreamingCity {
   root = new T.Group();
   life: CityLife;
+  transit: Transit;
   interiorView: {
     building: number;
     floor: number;
-    rooms: { x: number; z: number; w: number; d: number }[];
+    rooms: {
+      x: number;
+      z: number;
+      w: number;
+      d: number;
+      free?: { x: number; z: number }[];
+    }[];
   } | null = null;
   playerThreat: {
     position: T.Vector3;
@@ -292,6 +336,7 @@ export class StreamingCity {
       delay: number;
       panic: number;
       speed: number;
+      velocity: T.Vector3;
     }
   >();
   private lifeScan = -1;
@@ -312,6 +357,8 @@ export class StreamingCity {
   private materials = new Map<number, T.MeshStandardMaterial>();
   private proxySlots = new Map<number, Proxy[]>();
   private actors = new ActorRenderer();
+  private obstacles = new Map<string, Part[]>();
+  private rails = new Map<string, Part[]>();
   private worker: Worker | null = null;
   private disposed = false;
   private elapsed = 0;
@@ -333,6 +380,7 @@ export class StreamingCity {
   ) {
     this.plan = createPlan(seed, input);
     this.life = new CityLife(this.plan);
+    this.transit = new Transit(this.plan);
     this.physics = physics;
     this.buildProxies();
     this.root.add(this.actors.root);
@@ -384,6 +432,17 @@ export class StreamingCity {
   get options() {
     return this.plan.options;
   }
+  setPeopleBudget(count: number) {
+    this.actors.closeBudget = Math.max(4, Math.min(32, Math.round(count)));
+  }
+  seekHour(hour: number) {
+    this.life.setHour(hour);
+    this.liveActors.clear();
+    this.citizens = [];
+    this.cars = this.transit.cars;
+    this.actors.rebuild(this.cars);
+    this.lifeScan = this.elapsed - 2;
+  }
   get activeDistricts() {
     return this.loaded.size;
   }
@@ -394,6 +453,19 @@ export class StreamingCity {
     let m = this.materials.get(c);
     if (!m) {
       m = new T.MeshStandardMaterial({ color: c, roughness: 0.85 });
+      if ([...SIGNAL_COLORS, ...WALK_COLORS].includes(c)) {
+        m.emissive.setHex(c);
+        m.emissiveIntensity = 2;
+        m.onBeforeCompile = (s) => {
+          s.fragmentShader = s.fragmentShader.replace(
+            "#include <emissivemap_fragment>",
+            "#include <emissivemap_fragment>\n#ifdef USE_INSTANCING_COLOR\ntotalEmissiveRadiance *= vColor;\n#endif",
+          );
+        };
+        m.customProgramCacheKey = () => "traffic-aspect";
+        this.materials.set(c, m);
+        return m;
+      }
       if (c === 0x41494a) finish(m, "asphalt");
       else if (c === 0x9a9e90) finish(m, "stone");
       else if (c === 0x967657) finish(m, "wood");
@@ -583,6 +655,31 @@ export class StreamingCity {
     }
     this.parts.push(...this.extras);
     this.batches.push(...this.extraBatches);
+    this.obstacles.clear();
+    this.rails.clear();
+    for (const p of this.parts)
+      if (p.color === 0x73858b || p.color === 0x303b40) {
+        const k = Math.floor(p.p.x / 4) + "," + Math.floor(p.p.z / 4);
+        if (!this.rails.has(k)) this.rails.set(k, []);
+        this.rails.get(k)!.push(p);
+      }
+    for (const p of this.parts)
+      if (!p.owner && p.s.y > 0.32 && Math.max(p.s.x, p.s.z) < 8) {
+        for (
+          let x = Math.floor((p.p.x - p.s.x / 2) / 4);
+          x <= Math.floor((p.p.x + p.s.x / 2) / 4);
+          x++
+        )
+          for (
+            let z = Math.floor((p.p.z - p.s.z / 2) / 4);
+            z <= Math.floor((p.p.z + p.s.z / 2) / 4);
+            z++
+          ) {
+            const k = x + "," + z;
+            if (!this.obstacles.has(k)) this.obstacles.set(k, []);
+            this.obstacles.get(k)!.push(p);
+          }
+      }
     this.population = this.citizens.filter((p) => p.alive).length;
     this.actors.rebuild([...this.citizens, ...this.cars]);
   }
@@ -689,7 +786,62 @@ export class StreamingCity {
         } else d.dispose();
       }
     }
-    this.updateLives(dt, time, impact);
+    const transitChanged = this.transit.update(dt, time, focus, (car, next) => {
+      if (
+        this.cars.some(
+          (c) =>
+            c !== car &&
+            c.alive &&
+            c.group.visible &&
+            Math.abs(next.x - c.group.position.x) <
+              (car.axis === "x" ? car.length! / 2 : car.width! / 2) +
+                (c.axis === "x" ? (c.length || 4.4) / 2 : (c.width || 2) / 2) &&
+            Math.abs(next.z - c.group.position.z) <
+              (car.axis === "z" ? car.length! / 2 : car.width! / 2) +
+                (c.axis === "z" ? (c.length || 4.4) / 2 : (c.width || 2) / 2),
+        )
+      )
+        return true;
+      if (
+        this.citizens.some(
+          (p) =>
+            p.alive &&
+            p.group.visible &&
+            p.group.position.y < 2 &&
+            Math.abs(next.x - p.group.position.x) <
+              (car.axis === "x" ? car.length! / 2 : car.width! / 2) + 0.3 &&
+            Math.abs(next.z - p.group.position.z) <
+              (car.axis === "z" ? car.length! / 2 : car.width! / 2) + 0.3,
+        )
+      )
+        return true;
+      const player = this.playerThreat;
+      if (
+        player &&
+        player.position.y < 3.2 &&
+        Math.abs(next.x - player.position.x) <
+          (car.axis === "x" ? car.length! / 2 : car.width! / 2) +
+            player.radius &&
+        Math.abs(next.z - player.position.z) <
+          (car.axis === "z" ? car.length! / 2 : car.width! / 2) + player.radius
+      )
+        return true;
+      if (this.physics.floorHeight(next.x, next.z) > 0.36) return true;
+      const cx = Math.floor(next.x / 4),
+        cz = Math.floor(next.z / 4);
+      for (let x = -1; x <= 1; x++)
+        for (let z = -1; z <= 1; z++)
+          for (const p of this.rails.get(cx + x + "," + (cz + z)) || [])
+            if (
+              !p.alive &&
+              Math.abs(next.x - p.p.x) < 2 &&
+              Math.abs(next.z - p.p.z) < 2
+            )
+              return true;
+      return false;
+    });
+    this.updateLives(dt, time, impact, transitChanged);
+    for (const d of this.loaded.values()) d.updateSignals(time);
     for (const d of this.loaded.values())
       d.root.traverse((o) => {
         const b = o.userData.building as Building | undefined;
@@ -698,7 +850,12 @@ export class StreamingCity {
     this.actors.update([...this.citizens, ...this.cars], camera.position);
     this.population = this.citizens.filter((p) => p.alive).length;
   }
-  private updateLives(dt: number, time: number, impact: T.Vector3 | null) {
+  private updateLives(
+    dt: number,
+    time: number,
+    impact: T.Vector3 | null,
+    transitChanged = false,
+  ) {
     this.life.tick(dt);
     for (const [id, a] of this.liveActors)
       if (!(a.person || a.car)!.alive) this.life.dead.add(id);
@@ -706,7 +863,7 @@ export class StreamingCity {
       if (Number.isFinite(b.collapseFrom)) {
         if (b.planId !== undefined) this.life.displaced.add(b.planId);
       }
-    if (this.elapsed - this.lifeScan > 1) {
+    if (this.elapsed - this.lifeScan > 1 || transitChanged) {
       this.lifeScan = this.elapsed;
       const indoors = new Set(
         this.interiorView
@@ -722,11 +879,12 @@ export class StreamingCity {
           .slice(0, this.options.crowds * this.options.budget),
       );
       for (const id of indoors) wanted.add(id);
-      let changed = false;
+      let changed = transitChanged;
       for (const [id, a] of this.liveActors)
         if (
           (!wanted.has(id) && a.panic < this.life.seconds) ||
-          (a.car && (indoors.has(id) || !this.life.sample(id).vehicle))
+          (a.car && (indoors.has(id) || !this.life.sample(id).vehicle)) ||
+          (a.person && !indoors.has(id) && this.life.sample(id).vehicle)
         ) {
           this.liveActors.delete(id);
           changed = true;
@@ -747,6 +905,7 @@ export class StreamingCity {
             delay: this.life.delays.get(id) || 0,
             panic: 0,
             speed: 0,
+            velocity: new T.Vector3(),
           });
           changed = true;
         }
@@ -754,9 +913,9 @@ export class StreamingCity {
         this.citizens = [...this.liveActors.values()].flatMap((a) =>
           a.person ? [a.person] : [],
         );
-        this.cars = [...this.liveActors.values()].flatMap((a) =>
-          a.car ? [a.car] : [],
-        );
+        this.cars = [...this.liveActors.values()]
+          .flatMap((a) => (a.car ? [a.car] : []))
+          .concat(this.transit.cars);
         this.actors.rebuild([...this.citizens, ...this.cars]);
       }
     }
@@ -770,7 +929,21 @@ export class StreamingCity {
       if (!peopleBuckets.has(key)) peopleBuckets.set(key, []);
       peopleBuckets.get(key)!.push(p);
     }
+    const crowdBodies: CrowdBody[] = [];
+    const crowdRecords: {
+      id: number;
+      a: {
+        person?: Person;
+        velocity: T.Vector3;
+        delay: number;
+        speed: number;
+        offset: T.Vector3;
+      };
+      sample: LifeSample;
+      frightened: boolean;
+    }[] = [];
     const carBuckets = new Map<string, Vehicle[]>();
+    const interiorSlots = new Map<number, number>();
     for (const c of this.cars) {
       const k =
         Math.floor(c.group.position.x / 12) +
@@ -784,6 +957,25 @@ export class StreamingCity {
       if (!actor.alive) continue;
       const v = this.life.sample(id),
         pos = actor.group.position;
+      if (a.person && actor.group.userData.indoor && !v.inside) {
+        const transitTime =
+          6 + ((actor.group.userData.roomFloor || 0) * 3.1) / 3;
+        a.delay += transitTime;
+        this.life.delays.set(id, a.delay);
+        actor.group.userData.exitUntil = this.life.seconds + transitTime;
+        actor.group.userData.indoor = false;
+        actor.group.visible = false;
+        continue;
+      }
+      if (actor.group.userData.exitUntil) {
+        if (actor.group.userData.exitUntil > this.life.seconds) {
+          actor.group.visible = false;
+          continue;
+        }
+        delete actor.group.userData.exitUntil;
+        pos.set(v.x, 0.285, v.z);
+        a.velocity.set(0, 0, 0);
+      }
       if (
         a.person &&
         this.interiorView &&
@@ -796,20 +988,44 @@ export class StreamingCity {
               v.activity === "sleeping" ? 1 : v.activity === "working" ? 2 : 0
             ],
           base = 0.41 + this.interiorView.floor * 3.1;
+        const roomIndex = this.interiorView.rooms.indexOf(room),
+          slot = interiorSlots.get(roomIndex) || 0;
+        interiorSlots.set(roomIndex, slot + 1);
         actor.group.visible = true;
+        actor.group.userData.indoor = true;
+        actor.group.userData.roomFloor = this.interiorView.floor;
         actor.group.rotation.x = 0;
         pos.set(room.x + room.w * 0.18, base, room.z);
         posePerson(a.person, dt, time, 0, 0);
         if (v.activity === "sleeping") {
-          pos.set(room.x, base + 0.62, room.z - 1.05);
-          actor.group.rotation.x = Math.PI / 2;
+          pos.set(
+            room.x + (slot % 2 ? -0.32 : 0.32),
+            base + 0.69,
+            room.z + 0.85,
+          );
+          actor.group.rotation.x = -Math.PI / 2;
         } else if (v.activity === "working") {
           pos.z -= 1.5;
+          pos.x = room.x + ((slot % 3) - 1) * 0.65;
           for (const arm of a.person.shoulders) arm.rotation.x = -0.65;
         } else {
-          pos.set(room.x, base - 0.4, room.z + 0.1);
+          pos.set(room.x + ((slot % 3) - 1) * 0.62, base - 0.4, room.z - 0.1);
+          actor.group.rotation.y = Math.PI;
           for (const hip of a.person.hips) hip.rotation.x = -Math.PI / 2;
           for (const knee of a.person.knees) knee.rotation.x = Math.PI / 2;
+        }
+        const capacity = v.activity === "sleeping" ? 2 : 3;
+        if (slot >= capacity && room.free?.length) {
+          const point = room.free[(slot - capacity) % room.free.length];
+          pos.set(point.x, base, point.z);
+          actor.group.rotation.x = 0;
+          posePerson(
+            a.person,
+            dt,
+            time,
+            0,
+            Math.atan2(room.x - point.x, room.z - point.z),
+          );
         }
         continue;
       }
@@ -831,72 +1047,38 @@ export class StreamingCity {
         if (danger)
           a.panic = this.life.seconds + (player && player.height > 5 ? 8 : 3);
         const frightened = a.panic > this.life.seconds;
+        actor.group.visible = !v.inside || frightened;
+        if (!actor.group.visible) continue;
+        const target = new T.Vector3(v.x, 0.285, v.z);
+        let speed = v.speed;
         if (frightened && danger) {
           const dir = pos.clone().sub(danger);
           dir.y = 0;
           if (dir.lengthSq() < 0.01) dir.set(id % 2 ? 1 : -1, 0, 1);
           dir.normalize();
-          const next = pos
-            .clone()
-            .addScaledVector(dir, dt * (player && player.height > 5 ? 4 : 2.8));
-          if (!this.volumeBlocked(next.x, 0.285, next.z, 0.23, 1.8)) {
-            a.offset.x = next.x - v.x;
-            a.offset.z = next.z - v.z;
+          target.copy(pos).addScaledVector(dir, 3);
+          speed = player && player.height > 5 ? 4 : 2.8;
+        } else if (v.activity === "commuting") {
+          target.x += Math.sin(v.heading) * 0.55;
+          target.z += Math.cos(v.heading) * 0.55;
+          if (crossingWait(this.plan, pos.x, pos.z, target.x, target.z, time)) {
+            target.copy(pos);
+            speed = 0;
           }
-        } else a.offset.multiplyScalar(Math.exp(-dt * 0.8));
-        if (!v.inside) {
-          const cx = Math.floor(pos.x / 2),
-            cz = Math.floor(pos.z / 2);
-          const separation = new T.Vector3();
-          for (let x = -1; x <= 1; x++)
-            for (let z = -1; z <= 1; z++)
-              for (const other of peopleBuckets.get(cx + x + "," + (cz + z)) ||
-                []) {
-                if (
-                  other === a.person ||
-                  Math.abs(other.group.position.y - pos.y) > 2
-                )
-                  continue;
-                const dx = pos.x - other.group.position.x,
-                  dz = pos.z - other.group.position.z;
-                const distance = Math.hypot(dx, dz);
-                if (distance < 0.7) {
-                  const angle = id * 2.399;
-                  separation.x +=
-                    (distance > 0.01 ? dx / distance : Math.cos(angle)) *
-                    (0.7 - distance);
-                  separation.z +=
-                    (distance > 0.01 ? dz / distance : Math.sin(angle)) *
-                    (0.7 - distance);
-                }
-              }
-          separation.multiplyScalar(Math.min(1, dt * 6));
-          if (
-            !this.volumeBlocked(
-              v.x + a.offset.x + separation.x,
-              0.285,
-              v.z + a.offset.z + separation.z,
-              0.23,
-              1.8,
-            )
-          )
-            a.offset.add(separation);
         }
-        const target = new T.Vector3(v.x + a.offset.x, 0.285, v.z + a.offset.z);
-        const velocity = target.clone().sub(pos);
-        a.speed = velocity.length() / Math.max(dt, 0.001);
-        pos.copy(target);
-        actor.group.visible = !v.inside || frightened;
-        posePerson(
-          a.person,
-          dt,
-          time,
-          Math.min(4, a.speed),
-          frightened && danger
-            ? Math.atan2(pos.x - danger.x, pos.z - danger.z)
-            : v.heading,
-          frightened,
-        );
+        const radius = 0.28 * a.person.scale;
+        crowdBodies.push({
+          id,
+          x: pos.x,
+          z: pos.z,
+          vx: a.velocity.x,
+          vz: a.velocity.z,
+          tx: target.x,
+          tz: target.z,
+          radius,
+          speed,
+        });
+        crowdRecords.push({ id, a, sample: v, frightened });
       } else {
         const forward = new T.Vector3(
           Math.sin(v.heading),
@@ -921,23 +1103,8 @@ export class StreamingCity {
           .addScaledVector(forward, brakingDistance);
         if (this.physics.floorHeight(aheadPoint.x, aheadPoint.z) > 0.35)
           stop = true;
-        const nearRoad = this.plan.roads.some(
-          (r) =>
-            Math.abs(pos.x - r) < 7 &&
-            Math.abs(
-              pos.z -
-                this.plan.roads.reduce(
-                  (best, q) =>
-                    Math.abs(pos.z - q) < Math.abs(pos.z - best) ? q : best,
-                  this.plan.roads[0],
-                ),
-            ) < 7,
-        );
-        if (
-          nearRoad &&
-          Math.floor(time / 9) % 2 === (Math.abs(forward.x) > 0.5 ? 0 : 1)
-        )
-          stop = true;
+        const redDistance = stopLine(this.plan, pos.x, pos.z, v.heading, time);
+        if (redDistance < brakingDistance) stop = true;
         const cx = Math.floor(pos.x / 12),
           cz = Math.floor(pos.z / 12);
         for (let x = -1; x <= 1; x++)
@@ -948,7 +1115,7 @@ export class StreamingCity {
                 along = diff.dot(forward);
               if (
                 along > 0 &&
-                along < brakingDistance &&
+                along < brakingDistance + (other.length || 4.4) / 2 &&
                 Math.abs(diff.x * forward.z - diff.z * forward.x) < 1.7
               )
                 stop = true;
@@ -976,8 +1143,16 @@ export class StreamingCity {
           this.life.delays.set(id, a.delay);
         }
         const desired = this.life.sample(id);
-        pos.x = T.MathUtils.damp(pos.x, desired.x, 8, dt);
-        pos.z = T.MathUtils.damp(pos.z, desired.z, 8, dt);
+        const movement = new T.Vector3(desired.x - pos.x, 0, desired.z - pos.z);
+        movement.clampLength(0, a.speed * dt);
+        const next = pos.clone().add(movement);
+        if (!this.vehicleBlocked(next.x, next.y, next.z, 0.1, 1.7, a.car))
+          pos.copy(next);
+        else {
+          a.delay += dt;
+          this.life.delays.set(id, a.delay);
+          a.speed = 0;
+        }
         pos.y = 0.03;
         actor.group.visible = !v.inside;
         const turn =
@@ -989,16 +1164,58 @@ export class StreamingCity {
         a.car!.axis = Math.abs(forward.x) > 0.5 ? "x" : "z";
       }
     }
+    const resolved = advanceCrowd(
+      crowdBodies,
+      dt,
+      (x, z, r) =>
+        this.volumeBlocked(x, 0.285, z, r, 1.8) ||
+        this.vehicleBlocked(x, 0.285, z, r, 1.8),
+    );
+    resolved.forEach((next, i) => {
+      const { id, a, sample, frightened } = crowdRecords[i],
+        p = a.person!;
+      a.velocity.set(next.vx, 0, next.vz);
+      a.speed = a.velocity.length();
+      p.group.position.set(next.x, 0.285, next.z);
+      if (sample.activity === "commuting" && !frightened) {
+        const progress = Math.max(
+          0,
+          next.vx * Math.sin(sample.heading) +
+            next.vz * Math.cos(sample.heading),
+        );
+        a.delay +=
+          dt * (1 - Math.min(1, progress / Math.max(0.1, sample.speed)));
+        this.life.delays.set(id, a.delay);
+      }
+      posePerson(
+        p,
+        dt,
+        time,
+        Math.min(4, a.speed),
+        a.speed > 0.1 ? Math.atan2(next.vx, next.vz) : sample.heading,
+        frightened,
+      );
+    });
   }
-  vehicleBlocked(x: number, y: number, z: number, r: number, h: number) {
+  vehicleBlocked(
+    x: number,
+    y: number,
+    z: number,
+    r: number,
+    h: number,
+    ignore?: Vehicle,
+  ) {
     return this.cars.some(
       (c) =>
+        c !== ignore &&
         c.alive &&
         c.group.visible &&
-        y < 1.8 &&
+        y < (c.kind === "tram" ? 3.4 : 1.8) &&
         y + h > 0 &&
-        Math.abs(x - c.group.position.x) < (c.axis === "x" ? 2.2 : 1) + r &&
-        Math.abs(z - c.group.position.z) < (c.axis === "z" ? 2.2 : 1) + r,
+        Math.abs(x - c.group.position.x) <
+          (c.axis === "x" ? (c.length || 4.4) / 2 : (c.width || 2) / 2) + r &&
+        Math.abs(z - c.group.position.z) <
+          (c.axis === "z" ? (c.length || 4.4) / 2 : (c.width || 2) / 2) + r,
     );
   }
   nearBuildings(point: T.Vector3, radius: number) {
@@ -1073,6 +1290,21 @@ export class StreamingCity {
     h: number,
     ignore?: number,
   ) {
+    for (let cx = Math.floor((x - r) / 4); cx <= Math.floor((x + r) / 4); cx++)
+      for (
+        let cz = Math.floor((z - r) / 4);
+        cz <= Math.floor((z + r) / 4);
+        cz++
+      )
+        for (const p of this.obstacles.get(cx + "," + cz) || [])
+          if (
+            p.alive &&
+            y < p.p.y + p.s.y / 2 &&
+            y + h > p.p.y - p.s.y / 2 &&
+            Math.abs(x - p.p.x) < p.s.x / 2 + r &&
+            Math.abs(z - p.p.z) < p.s.z / 2 + r
+          )
+            return true;
     if (
       x - r < this.plan.min ||
       x + r > this.plan.max ||

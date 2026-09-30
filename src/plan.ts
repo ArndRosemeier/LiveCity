@@ -64,6 +64,7 @@ export interface BuildingPlan {
 }
 export interface DistrictPlan {
   id: number;
+  gridSize: number;
   ix: number;
   iz: number;
   x0: number;
@@ -115,6 +116,7 @@ export function createPlan(
         z1 = roads[iz + 1];
       const district: DistrictPlan = {
         id,
+        gridSize: o.blocks,
         ix,
         iz,
         x0,
@@ -210,5 +212,6 @@ export interface DistrictData {
   count: number;
   detail: number;
 }
-// Record: position(3), dimensions(3), RGB integer, shape, local building, support role, floor, yaw.
-export const STRIDE = 12;
+// Record: position(3), dimensions(3), RGB integer, shape, local building,
+// support role, floor, yaw, pitch, attachment parent index.
+export const STRIDE = 14;

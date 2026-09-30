@@ -15,6 +15,7 @@ export interface Part {
   mesh?: T.InstancedMesh;
   index?: number;
   owner?: Building;
+  support?: Part;
 }
 export interface Building {
   planId?: number;

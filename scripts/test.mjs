@@ -53,7 +53,7 @@ const outputs = fs.readdirSync(dir).filter((file) => file.endsWith(".js"));
 for (const file of outputs) {
   const output = fs
     .readFileSync(path.join(dir, file), "utf8")
-    .replace(/from ['"]\.\/(\w+)['"]/g, "from './$1.js'");
+    .replace(/from ['"]\.\/([\w-]+)['"]/g, "from './$1.js'");
   fs.writeFileSync(path.join(dir, file), output);
 }
 const { City } = await import("../.qa/world.js");
@@ -245,6 +245,28 @@ assert.equal(
 );
 assert.ok(interior.changeFloor(1));
 assert.equal(interior.floorY(), floorStart + 3.1);
+assert.equal(
+  interior.support(enteredPlan.x + enteredPlan.w + 20, enteredPlan.z),
+  null,
+  "Leaving the real floor footprint must remove elevated support",
+);
+const falling = new Player();
+falling.teleport(
+  enteredPlan.x + enteredPlan.w + 20,
+  interior.floorY(),
+  enteredPlan.z,
+);
+const fallEnvironment = {
+  ...environment,
+  floor: (x, z, y) => Math.max(0, interior.support(x, z, y) ?? -Infinity),
+};
+for (let i = 0; i < 240; i++)
+  falling.update(1 / 60, i / 60, new Set(), true, fallEnvironment);
+assert.ok(
+  falling.position.y < 0.05,
+  "A player leaving an elevated interior must fall to ground",
+);
+falling.surface.dispose();
 interior.exit();
 testCity.dispose();
 interiorPhysics.world.free();
@@ -303,6 +325,15 @@ const streamedWorld = {
   },
 };
 streamedDamage.bindCity(streamedWorld);
+const attached = district.parts.find((p) => p.support && p.building < 0);
+assert.ok(attached, "Street detail must contain supported attachments");
+streamedWorld.remove(attached.support);
+streamedDamage.hit(streamedWorld, attached.support.p, 0.01);
+assert.equal(
+  attached.alive,
+  false,
+  "Removing a street post must release its attached geometry",
+);
 const target = district.buildings[0];
 streamedDamage.hit(streamedWorld, new T.Vector3(target.x, 1, target.z), 8, 2);
 for (let i = 0; i < 900; i++) streamedDamage.update(1 / 60, streamedWorld);
@@ -528,8 +559,111 @@ for (const c of [first, repeat, other]) {
 damage.clear();
 assert.equal(damage.destroyed, 0);
 assert.equal(damage.pieces.length, 0);
+const { HumanSurface } = await import("../.qa/human-surface.js");
+const { signalPhase, nearestRoad, advanceCrowd } =
+  await import("../.qa/traffic.js");
+const { tramLines, tramPosition } = await import("../.qa/transit.js");
+const surfaceActor = createPerson("SURFACE-QA"),
+  surface = new HumanSurface(surfaceActor);
+const skinGeometry = surface.mesh.geometry,
+  weights = skinGeometry.attributes.skinWeight,
+  indices = skinGeometry.attributes.skinIndex,
+  vertices = skinGeometry.attributes.position;
+assert.ok(vertices.count > 10000, "Close people must have anatomical surfaces");
+assert.equal(skinGeometry.groups.length, 4);
+for (let i = 0; i < weights.count; i++) {
+  let sum = 0;
+  for (let j = 0; j < 4; j++) {
+    const w = weights.array[i * 4 + j];
+    sum += w;
+    assert.ok(w >= 0 && w <= 1);
+    assert.ok(indices.array[i * 4 + j] < surface.mesh.skeleton.bones.length);
+  }
+  assert.ok(Math.abs(sum - 1) < 1e-6);
+}
+for (let f = 0; f < 120; f++) {
+  animatePerson(surfaceActor, 1 / 60, f / 60, districtPlan, null);
+  surfaceActor.group.updateMatrixWorld(true);
+  surface.update(surfaceActor, f / 60);
+  surface.mesh.skeleton.update();
+  for (let v = 0; v < vertices.count; v += 137) {
+    const point = new T.Vector3().fromBufferAttribute(vertices, v);
+    surface.mesh.applyBoneTransform(v, point);
+    assert.ok(
+      point.toArray().every(Number.isFinite),
+      "Skinned gait must remain finite",
+    );
+  }
+}
+const surfaceTwin = new HumanSurface(createPerson("SURFACE-QA"));
+assert.deepEqual(
+  surfaceTwin.mesh.geometry.attributes.position.array,
+  vertices.array,
+);
+surface.dispose();
+surfaceTwin.dispose();
+for (let t = -35; t < 70; t += 0.25) {
+  const signal = signalPhase(t, 4, 7);
+  assert.ok(!(signal.x === "green" && signal.z === "green"));
+  if (signal.walk) assert.ok(signal.x === "red" && signal.z === "red");
+}
+assert.equal(nearestRoad({ roads: [-100, -41, 12, 98] }, 0), 2);
+const walkers = [
+  { id: 1, x: -2, z: 0, vx: 1, vz: 0, tx: 3, tz: 0, radius: 0.3, speed: 1.2 },
+  { id: 2, x: 2, z: 0, vx: -1, vz: 0, tx: -3, tz: 0, radius: 0.3, speed: 1.2 },
+];
+for (let f = 0; f < 480; f++) {
+  const result = advanceCrowd(walkers, 1 / 60, () => false);
+  result.forEach((next, i) => Object.assign(walkers[i], next));
+  assert.ok(
+    Math.hypot(walkers[0].x - walkers[1].x, walkers[0].z - walkers[1].z) >=
+      0.59,
+    "Head-on pedestrians must stay separated",
+  );
+}
+assert.ok(
+  walkers[0].x > 2 && walkers[1].x < -2,
+  "Pedestrians must pass without deadlock",
+);
+const wallBody = [
+  { id: 1, x: 0, z: 0, vx: 0, vz: 0, tx: 3, tz: 0, radius: 0.3, speed: 1 },
+];
+for (let f = 0; f < 240; f++)
+  Object.assign(
+    wallBody[0],
+    advanceCrowd(wallBody, 1 / 60, (x, z, r) => x + r > 1)[0],
+  );
+assert.ok(
+  wallBody[0].x <= 0.701,
+  "Crowd steering must respect solid obstacles",
+);
+for (const line of tramLines(big)) {
+  for (const leg of line.legs) {
+    for (const boundary of [
+      leg.start,
+      leg.start + leg.dwell,
+      leg.start + leg.duration,
+    ]) {
+      const a = tramPosition(line, boundary - 0.0001),
+        b = tramPosition(line, boundary + 0.0001);
+      assert.ok(
+        Math.hypot(a.x - b.x, a.z - b.z) < 0.01,
+        "Tram timetables must be continuous",
+      );
+      assert.ok([a.x, a.z, a.speed, b.x, b.z, b.speed].every(Number.isFinite));
+    }
+  }
+}
+const attachmentData = generateDistrict(districtPlan, 1);
+for (let i = 0; i < attachmentData.count; i++) {
+  const parent = attachmentData.parts[i * STRIDE + 13];
+  assert.ok(
+    parent === -1 || (parent >= 0 && parent < i),
+    "Attachments must reference earlier support parts",
+  );
+}
 console.log(
-  "PASS: persistent resident lives and needs, scaled player physics and flight, camera collision, doors and livable interiors, streaming damage persistence, anatomy, ragdolls and structural physics.",
+  "PASS: persistent lives, scaled physics, elevated falls, interiors, streaming destruction, skinned anatomy, crowd separation, signal safety, continuous tram timetables, ragdolls and structural physics.",
 );
 // Only remove the known temporary compiler outputs created by this test.
 for (const file of outputs) fs.unlinkSync(path.join(dir, file));

@@ -50,7 +50,13 @@ export class CityPhysics {
         p.s.x < 12 &&
         p.s.z < 12 &&
         p.p.y < 0.3;
-      if (!supports.has(p) && !masonry && !roof && !pavement) continue;
+      const street =
+        p.building < 0 &&
+        p.s.y > 0.32 &&
+        Math.max(p.s.x, p.s.z) < 8 &&
+        p.p.y - p.s.y / 2 < 2.5;
+      if (!supports.has(p) && !masonry && !roof && !pavement && !street)
+        continue;
       const desc = RAPIER.ColliderDesc.cuboid(p.s.x / 2, p.s.y / 2, p.s.z / 2)
         .setTranslation(p.p.x, p.p.y, p.p.z)
         .setRotation(p.q)

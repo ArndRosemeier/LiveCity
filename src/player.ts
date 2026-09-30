@@ -1,5 +1,6 @@
 import * as T from "three";
 import { createPerson, posePerson, type Person } from "./inhabitants";
+import { HumanSurface } from "./human-surface";
 export interface PlayerEnvironment {
   blocked(x: number, y: number, z: number, r: number, h: number): boolean;
   floor(x: number, z: number, y: number): number;
@@ -14,6 +15,7 @@ export class Player {
   readonly trail = new T.Group();
   private trails: { line: T.Line; positions: Float32Array }[] = [];
   readonly avatar: Person = createPerson("COMMON-GROUND/PLAYER");
+  readonly surface = new HumanSurface(this.avatar);
   readonly position = new T.Vector3(8.3, 0.23, 24);
   readonly velocity = new T.Vector3();
   scale = 1;
@@ -56,6 +58,7 @@ export class Player {
       if (o instanceof T.Mesh) {
         o.castShadow = true;
         o.receiveShadow = true;
+        o.visible = Boolean(o.userData.accessory);
       }
     });
     this.avatar.group.scale.setScalar(1);
@@ -278,6 +281,7 @@ export class Player {
         dt,
       );
     this.updateTrail(x, dt);
+    this.surface.update(this.avatar, time);
   }
   private updateTrail(x: number, dt: number) {
     const g = this.avatar.group;
