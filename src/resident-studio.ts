@@ -1,5 +1,6 @@
 import * as T from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { createPerson, posePerson, type Person } from "./inhabitants";
 import { HumanSurface } from "./human-surface";
 export class ResidentStudio {
@@ -40,18 +41,34 @@ export class ResidentStudio {
     this.renderer.shadowMap.type = T.PCFSoftShadowMap;
     this.dialog.querySelector("#studio-view")!.append(this.renderer.domElement);
     this.scene.background = new T.Color(0x9eaca8);
-    const sun = new T.DirectionalLight(0xffdfc4, 3.4);
-    sun.position.set(-3, 4, 4);
+    RectAreaLightUniformsLib.init();
+    const keyBox = new T.RectAreaLight(0xffede0, 9, 2.4, 3.2),
+      fillBox = new T.RectAreaLight(0xe0eaff, 3.5, 2, 2.6);
+    keyBox.position.set(-2.4, 2.7, 3.5);
+    keyBox.lookAt(0, 1.4, 0);
+    fillBox.position.set(2.5, 1.9, 2.8);
+    fillBox.lookAt(0, 1.5, 0);
+    const sun = new T.DirectionalLight(0xffeee0, 0.65);
+    sun.position.set(-3, 3, 5);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.camera.left = sun.shadow.camera.bottom = -3;
-    sun.shadow.camera.right = sun.shadow.camera.top = 3;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = sun.shadow.camera.bottom = -1.4;
+    sun.shadow.camera.right = sun.shadow.camera.top = 1.4;
     sun.shadow.camera.near = 0.1;
     sun.shadow.camera.far = 12;
-    sun.shadow.normalBias = 0.008;
-    const rim = new T.DirectionalLight(0xb7d9e9, 1.8);
+    sun.shadow.normalBias = 0.0008;
+    const rim = new T.DirectionalLight(0xb7d9e9, 1.1);
     rim.position.set(2, 2, -3);
-    this.scene.add(sun, rim, new T.HemisphereLight(0xd3e5eb, 0x85745e, 1.7));
+    const fill = new T.DirectionalLight(0xe4ecff, 0.3);
+    fill.position.set(3, 1.8, 5);
+    this.scene.add(
+      sun,
+      fill,
+      rim,
+      keyBox,
+      fillBox,
+      new T.HemisphereLight(0xd3e5eb, 0x85745e, 0.65),
+    );
     const ground = new T.Mesh(
       new T.PlaneGeometry(20, 20),
       new T.MeshStandardMaterial({ color: 0x8c9b94, roughness: 0.86 }),

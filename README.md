@@ -1,6 +1,6 @@
 # Common Ground — Metropolis
 
-An original TypeScript / Three.js / Rapier city running entirely in a browser. Buildings, pedestrians, vehicles, trees, furniture, textures, and sound are made procedurally from scratch. No downloaded models or external asset services are required.
+An original TypeScript / Three.js / Rapier city running entirely in a browser. Models and sound are created procedurally from scratch. Nearby people also use original AI-generated photographic skin and face references, bundled locally; no downloaded human models or runtime asset services are required. [Asset provenance and exact generation prompts](docs/people-assets.md).
 
 ## Run
 
@@ -40,6 +40,8 @@ Eviction stores removed part indices, building collapse levels, and surviving in
 Detailed architecture includes floor slabs, structural columns, actual window apertures, glazing, mullions, storefronts, cornices, balconies, brownstone chimneys, tenement fire escapes and water tanks, industrial roofs, HVAC, Art Deco crowns, and stepped towers. This remains a procedural visual vocabulary, rather than photorealistic reconstructions of individual buildings. `world.ts` retains the original compact generator as a regression fixture; the application uses `StreamingCity`.
 
 `inhabitants.ts` creates seeded bodies with tapered torsos and limbs, procedural faces, hair, skin, clothing, hands, hats, bags, and backpacks. Hip, knee, ankle, shoulder, elbow, and wrist hierarchies animate with two-bone leg IK, planted-foot compensation, arm swing, breathing, head movement, pauses, and impact flight. Nearby faces and fingers receive finer detail. Animated geometry is instanced globally; distant actors are culled. Nearby residents now follow persistent citywide schedules, with local crowd avoidance, danger reactions, and traffic braking.
+
+Close residents use a separate anatomical sculpt, landmark-warped facial pigment, layered wet eyes, blinking lids, pore relief, thin-tissue light diffusion, finer fingers, directional hair strands and a connected implicit garment mesh. A dedicated `human.worker.ts` builds these meshes serially and transfers geometry buffers; distant proxies remain visible until detailed people arrive. Shared maps and a bounded near cache keep the cost local. **The people of Common Ground** opens a portrait studio for inspecting faces and gait. This is a substantial realism improvement; hair volumes, anatomy and animation still need work before the people can be called photorealistic. [Implementation, experiments and remaining limits](docs/realistic-people.md).
 
 ## Destruction and physics
 

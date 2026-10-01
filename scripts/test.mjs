@@ -570,7 +570,33 @@ const skinGeometry = surface.mesh.geometry,
   indices = skinGeometry.attributes.skinIndex,
   vertices = skinGeometry.attributes.position;
 assert.ok(vertices.count > 10000, "Close people must have anatomical surfaces");
-assert.equal(skinGeometry.groups.length, 4);
+assert.equal(skinGeometry.groups.length, 5);
+const portrait = skinGeometry.attributes.portrait;
+let faceVertices = 0;
+for (let i = 0; i < portrait.count; i++) {
+  assert.ok(
+    [
+      portrait.getX(i),
+      portrait.getY(i),
+      portrait.getZ(i),
+      portrait.getW(i),
+    ].every(Number.isFinite),
+  );
+  assert.ok(portrait.getZ(i) >= 0 && portrait.getZ(i) <= 1);
+  if (portrait.getZ(i) > 0) {
+    faceVertices++;
+    assert.ok(
+      vertices.getY(i) > 1.47,
+      "Portrait pigment must stay on the head",
+    );
+    assert.ok(portrait.getX(i) >= 0 && portrait.getX(i) <= 1);
+    assert.ok(portrait.getY(i) >= 0 && portrait.getY(i) <= 1);
+  }
+}
+assert.ok(
+  faceVertices > 1000,
+  "Facial detail must cover an anatomical surface",
+);
 for (let i = 0; i < weights.count; i++) {
   let sum = 0;
   for (let j = 0; j < 4; j++) {
@@ -599,6 +625,78 @@ const surfaceTwin = new HumanSurface(createPerson("SURFACE-QA"));
 assert.deepEqual(
   surfaceTwin.mesh.geometry.attributes.position.array,
   vertices.array,
+);
+const { packHuman, unpackHuman, humanTransfers, humanRestRig } =
+  await import("../.qa/human-geometry.js");
+const packed = packHuman(surfaceTwin.mesh.geometry),
+  buffers = humanTransfers(packed);
+assert.equal(
+  new Set(buffers).size,
+  buffers.length,
+  "Worker packets must transfer each buffer once",
+);
+const transferred = structuredClone(packed, { transfer: buffers }),
+  roundTrip = unpackHuman(transferred);
+assert.deepEqual(roundTrip.attributes.position.array, vertices.array);
+assert.deepEqual(roundTrip.attributes.portrait.array, portrait.array);
+assert.deepEqual(roundTrip.groups, skinGeometry.groups);
+assert.ok(
+  roundTrip.morphAttributes.normal[0].array.every(Number.isFinite),
+  "Blink normals must survive worker transfer",
+);
+const fromWorker = new HumanSurface(createPerson("SURFACE-QA"), roundTrip);
+assert.equal(
+  fromWorker.mesh.geometry.attributes.skinWeight.count,
+  vertices.count,
+);
+fromWorker.dispose();
+const restSurface = new HumanSurface(
+  humanRestRig({ ...surfaceActor.group.userData }),
+  undefined,
+  true,
+);
+assert.deepEqual(
+  restSurface.mesh.geometry.attributes.position.array,
+  vertices.array,
+  "Worker rest-rig construction must match the rendered actor's identity",
+);
+restSurface.dispose();
+const { Surface } = await import("../.qa/human-surface.js"),
+  { tailoredShirt } = await import("../.qa/human-clothing.js");
+const garment = new Surface();
+tailoredShirt(garment, new T.Color(0x777777), 1, false, 0, 1, [
+  [6, 7],
+  [12, 13],
+]);
+const edges = new Map(),
+  connected = Array.from({ length: garment.positions.length / 3 }, () => []);
+for (let i = 0; i < garment.indices.length; i += 3) {
+  const tri = garment.indices.slice(i, i + 3);
+  for (let j = 0; j < 3; j++) {
+    const a = tri[j],
+      b = tri[(j + 1) % 3],
+      key = Math.min(a, b) + "," + Math.max(a, b);
+    edges.set(key, (edges.get(key) || 0) + 1);
+    connected[a].push(b);
+    connected[b].push(a);
+  }
+}
+assert.ok(
+  [...edges.values()].every((n) => n === 2),
+  "The joined shirt must have no open shoulder edges",
+);
+const reached = new Set([0]),
+  queue = [0];
+for (let i = 0; i < queue.length; i++)
+  for (const v of connected[queue[i]])
+    if (!reached.has(v)) {
+      reached.add(v);
+      queue.push(v);
+    }
+assert.equal(
+  reached.size,
+  connected.length,
+  "Both sleeves and torso must be one connected surface",
 );
 surface.dispose();
 surfaceTwin.dispose();
@@ -663,7 +761,7 @@ for (let i = 0; i < attachmentData.count; i++) {
   );
 }
 console.log(
-  "PASS: persistent lives, scaled physics, elevated falls, interiors, streaming destruction, skinned anatomy, crowd separation, signal safety, continuous tram timetables, ragdolls and structural physics.",
+  "PASS: persistent lives, scaled physics, elevated falls, interiors, streaming destruction, skinned anatomy, facial pigment bounds, worker transfers, connected garments, crowd separation, signal safety, continuous tram timetables, ragdolls and structural physics.",
 );
 // Only remove the known temporary compiler outputs created by this test.
 for (const file of outputs) fs.unlinkSync(path.join(dir, file));

@@ -961,6 +961,12 @@ function frame(now: number) {
     renderer.domElement.dataset.playerScale = String(player.scale);
     renderer.domElement.dataset.flying = String(player.flying);
     renderer.domElement.dataset.residents = String(city.life.population);
+    renderer.domElement.dataset.detailedPeople = String(city.humanDetail.count);
+    renderer.domElement.dataset.peopleWorker = city.humanDetail.workerFailed
+      ? "fallback"
+      : city.humanDetail.pending
+        ? "growing"
+        : "ready";
     renderer.domElement.dataset.interior = String(interiors.active?.id ?? -1);
     renderer.domElement.dataset.physicsBodies = String(
       destruction.physics.dynamicBodies,

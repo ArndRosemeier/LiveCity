@@ -357,6 +357,9 @@ export class StreamingCity {
   private materials = new Map<number, T.MeshStandardMaterial>();
   private proxySlots = new Map<number, Proxy[]>();
   private actors = new ActorRenderer();
+  get humanDetail() {
+    return this.actors.humanDetail;
+  }
   private obstacles = new Map<string, Part[]>();
   private rails = new Map<string, Part[]>();
   private worker: Worker | null = null;

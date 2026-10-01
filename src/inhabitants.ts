@@ -2,6 +2,11 @@ import * as T from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { Random } from "./random";
 import { HumanSurface } from "./human-surface";
+import {
+  unpackHuman,
+  type HumanGeometry,
+  type HumanProfile,
+} from "./human-geometry";
 import type { DistrictPlan } from "./plan";
 export interface Actor {
   group: T.Group;
@@ -702,8 +707,13 @@ export function posePerson(
       -0.2 - Math.max(0, -Math.sin(t)) * amplitude * 0.65;
   }
   p.spine.rotation.y = Math.sin(phase) * amplitude * 0.09;
-  p.head.rotation.y = Math.sin(time * 0.7 + p.phase) * 0.16;
-  p.head.rotation.x = Math.sin(time * 0.4 + p.phase) * 0.04;
+  // Brief attention shifts with pauses read more naturally than a perpetual
+  // sinusoidal head sweep; seeded phases keep the crowd unsynchronized.
+  const attention = Math.floor((time + p.phase) * 0.24),
+    yaw = Math.sin(attention * 2.399 + p.phase) * 0.16,
+    pitch = Math.sin(attention * 1.719 + p.phase) * 0.032;
+  p.head.rotation.y = T.MathUtils.damp(p.head.rotation.y, yaw, 2.8, dt);
+  p.head.rotation.x = T.MathUtils.damp(p.head.rotation.x, pitch, 2.1, dt);
 }
 export function createVehicle(seed: string): Vehicle {
   const r = new Random(seed),
@@ -922,6 +932,18 @@ export class ActorRenderer {
   root = new T.Group();
   closeBudget = 16;
   private close = new Map<Person, HumanSurface>();
+  private humanWorker?: Worker;
+  private workerFailed = false;
+  private requestId = 0;
+  private pending?: { id: number; person: Person };
+  private ready?: { person: Person; data: HumanGeometry };
+  get humanDetail() {
+    return {
+      count: this.close.size,
+      pending: !!this.pending,
+      workerFailed: this.workerFailed,
+    };
+  }
   private batches: {
     mesh: T.InstancedMesh;
     entries: { mesh: T.Mesh; actor: Actor }[];
@@ -986,10 +1008,24 @@ export class ActorRenderer {
         this.close.delete(p);
       }
     let generated = 0;
+    if (this.ready) {
+      const { person, data } = this.ready;
+      this.ready = undefined;
+      if (nearest.includes(person)) {
+        const s = new HumanSurface(person, unpackHuman(data));
+        this.close.set(person, s);
+        this.root.add(s.root);
+        generated++;
+      }
+    }
     for (const p of nearest) {
       let s = this.close.get(p);
       if (!s) {
         if (generated >= 1) continue;
+        if (typeof Worker !== "undefined" && !this.workerFailed) {
+          if (!this.pending && !this.ready) this.requestHuman(p);
+          continue;
+        }
         generated++;
         s = new HumanSurface(p);
         this.close.set(p, s);
@@ -1014,12 +1050,49 @@ export class ActorRenderer {
       batch.mesh.instanceMatrix.needsUpdate = true;
     }
   }
+  private requestHuman(person: Person) {
+    if (!this.humanWorker) {
+      const worker = new Worker(new URL("./human.worker.ts", import.meta.url), {
+        type: "module",
+      });
+      this.humanWorker = worker;
+      worker.onmessage = (
+        event: MessageEvent<{
+          id: number;
+          data?: HumanGeometry;
+          error?: string;
+        }>,
+      ) => {
+        if (this.humanWorker !== worker || event.data.id !== this.pending?.id)
+          return;
+        if (event.data.data)
+          this.ready = { person: this.pending.person, data: event.data.data };
+        else this.workerFailed = true;
+        this.pending = undefined;
+      };
+      worker.onerror = () => {
+        this.workerFailed = true;
+        this.pending = undefined;
+        worker.terminate();
+        this.humanWorker = undefined;
+      };
+    }
+    this.pending = { id: ++this.requestId, person };
+    this.humanWorker.postMessage({
+      id: this.requestId,
+      profile: { ...person.group.userData } as HumanProfile,
+    });
+  }
   private clearBatches() {
     for (const b of this.batches) b.mesh.dispose();
     for (const b of this.batches) b.mesh.removeFromParent();
     this.batches = [];
   }
   clear() {
+    this.humanWorker?.terminate();
+    this.humanWorker = undefined;
+    this.pending = undefined;
+    this.ready = undefined;
     this.clearBatches();
     for (const s of this.close.values()) s.dispose();
     this.close.clear();
